@@ -7,9 +7,8 @@
 // Standalone TopK Softmax Kernel Interface
 // Extracted from vLLM csrc/moe/topk_softmax_kernels.cu
 //
-// Provides two interfaces:
-//   1. topk_softmax_async() - Pure kernel launch (for profiling/benchmarking)
-//   2. topk_softmax()       - Synchronized version (for production use)
+// Maintains same structure as vLLM for easy profiling comparison:
+//   topk_softmax() -> dispatch_topk_softmax_launch<T>() -> topkGatingSoftmaxKernelLauncher()
 // =============================================================================
 
 // Supported data types for gating_output
@@ -19,12 +18,8 @@ enum class TopkSoftmaxDtype {
     BFloat16 = 2
 };
 
-// =============================================================================
-// Async Version - Pure kernel launch without synchronization
-// =============================================================================
-// Use this for performance benchmarking to measure pure kernel execution time.
-// Caller is responsible for synchronization if needed.
-//
+// Main entry point - mirrors vLLM's topk_softmax() structure
+// 
 // Parameters:
 //   topk_weights:          [num_tokens, topk] output - softmax weights for top-k experts
 //   topk_indices:          [num_tokens, topk] output - indices of top-k experts
@@ -37,31 +32,6 @@ enum class TopkSoftmaxDtype {
 //   dtype:                 data type of gating_output
 //   renormalize:           whether to renormalize top-k weights to sum to 1
 //   stream:                CUDA stream for async execution
-//
-// NOTE: This function does NOT call cudaStreamSynchronize internally.
-//       For benchmarking, use cudaEvent for accurate timing.
-//
-void topk_softmax_async(
-    float* topk_weights,
-    int* topk_indices,
-    int* token_expert_indices,
-    void* gating_output,
-    float* softmax_workspace,
-    int num_tokens,
-    int num_experts,
-    int topk,
-    TopkSoftmaxDtype dtype,
-    bool renormalize,
-    cudaStream_t stream);
-
-// =============================================================================
-// Sync Version - With internal synchronization (production use)
-// =============================================================================
-// This is the original interface that includes cudaStreamSynchronize.
-// Use this for production code where you need the function to complete
-// before returning.
-//
-// Same parameters as topk_softmax_async().
 //
 void topk_softmax(
     float* topk_weights,

@@ -74,15 +74,17 @@ int main(int argc, char** argv) {
     // Seed random number generator for reproducible results
     srand(42);
 
-    // Allocate GPU memory
+    // Allocate GPU memory (all allocations done before timing loop)
     void* gating_d = nullptr;
     float* weights_d = nullptr;
     int* indices_d = nullptr;
+    int* token_expert_indices_d = nullptr;  // Pre-allocate to avoid malloc in timed loop
 
     size_t input_bytes = tokens * experts * element_size;
     CUDA_CHECK(cudaMalloc(&gating_d, input_bytes));
     CUDA_CHECK(cudaMalloc(&weights_d, tokens * topk * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&indices_d, tokens * topk * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&token_expert_indices_d, tokens * topk * sizeof(int)));
 
     // Initialize input with random data (on host, then copy)
     std::vector<float> input_host(tokens * experts);
@@ -117,8 +119,8 @@ int main(int argc, char** argv) {
 
     printf("Warming up (%d runs)...\n", warmup);
     for (int i = 0; i < warmup; i++) {
-        topk_softmax(
-            weights_d, indices_d, nullptr, gating_d, nullptr,
+        topk_softmax_async(
+            weights_d, indices_d, token_expert_indices_d, gating_d, nullptr,
             tokens, experts, topk, dtype_enum, false, 0
         );
     }
@@ -131,8 +133,8 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < iters; i++) {
         cudaEventRecord(start);
-        topk_softmax(
-            weights_d, indices_d, nullptr, gating_d, nullptr,
+        topk_softmax_async(
+            weights_d, indices_d, token_expert_indices_d, gating_d, nullptr,
             tokens, experts, topk, dtype_enum, false, 0
         );
         cudaEventRecord(stop);
@@ -157,6 +159,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFree(gating_d));
     CUDA_CHECK(cudaFree(weights_d));
     CUDA_CHECK(cudaFree(indices_d));
+    CUDA_CHECK(cudaFree(token_expert_indices_d));
 
     return 0;
 }

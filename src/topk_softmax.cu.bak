@@ -609,17 +609,17 @@ void dispatch_topk_softmax_launch(
         num_tokens, num_experts, topk, renormalize, stream);
 }
 
-// =============================================================================
-// Async Version - Pure kernel launch without synchronization
-// =============================================================================
-// For performance benchmarking. Requires all pointers to be valid (no internal allocation).
-//
-void topk_softmax_async(
-    float* topk_weights,
-    int* topk_indices,
-    int* token_expert_indices,
-    void* gating_output,
-    float* softmax_workspace,
+// Main entry point - mirrors vLLM's topk_softmax() structure
+// Key differences from vLLM:
+//   - Uses raw pointers instead of torch::Tensor
+//   - Uses enum dtype instead of scalar_type()
+//   - Caller manages memory allocation
+void topk_softmax(
+    float* topk_weights,                // [num_tokens, topk] output
+    int* topk_indices,                  // [num_tokens, topk] output
+    int* token_expert_indices,          // [num_tokens, topk] output (can be nullptr, will alloc internally)
+    void* gating_output,                // [num_tokens, num_experts] input
+    float* softmax_workspace,           // workspace for non-power-of-2 experts (can be nullptr, will alloc if needed)
     int num_tokens,
     int num_experts,
     int topk,
@@ -627,10 +627,26 @@ void topk_softmax_async(
     bool renormalize,
     cudaStream_t stream)
 {
-    // Async version requires all pointers to be pre-allocated
-    assert(token_expert_indices != nullptr && "topk_softmax_async requires pre-allocated token_expert_indices");
-
-    // Type dispatch
+    // Determine if workspace is needed (same logic as vLLM)
+    const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
+    const bool needs_workspace = !is_pow_2 || num_experts > 256;
+    const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
+    
+    // Manage internal allocations if caller didn't provide
+    bool own_token_expert_indices = false;
+    bool own_softmax_workspace = false;
+    
+    if (token_expert_indices == nullptr) {
+        cudaMalloc(&token_expert_indices, num_tokens * topk * sizeof(int));
+        own_token_expert_indices = true;
+    }
+    
+    if (needs_workspace && softmax_workspace == nullptr) {
+        cudaMalloc(&softmax_workspace, workspace_size * sizeof(float));
+        own_softmax_workspace = true;
+    }
+    
+    // Type dispatch - same if-else structure as vLLM's topk_softmax()
     if (dtype == TopkSoftmaxDtype::Float32) {
         dispatch_topk_softmax_launch<float>(
             gating_output, topk_weights, topk_indices,
@@ -649,54 +665,8 @@ void topk_softmax_async(
     } else {
         assert(false && "Unsupported gating_output data type");
     }
-
-    // NOTE: No cudaStreamSynchronize here - pure async
-}
-
-// =============================================================================
-// Sync Version - With internal synchronization (production use)
-// =============================================================================
-// This version handles internal memory allocation and synchronization.
-//
-void topk_softmax(
-    float* topk_weights,                // [num_tokens, topk] output
-    int* topk_indices,                  // [num_tokens, topk] output
-    int* token_expert_indices,          // [num_tokens, topk] output (can be nullptr, will alloc internally)
-    void* gating_output,                // [num_tokens, num_experts] input
-    float* softmax_workspace,           // workspace for non-power-of-2 experts (can be nullptr, will alloc if needed)
-    int num_tokens,
-    int num_experts,
-    int topk,
-    TopkSoftmaxDtype dtype,
-    bool renormalize,
-    cudaStream_t stream)
-{
-    // Determine if workspace is needed (same logic as vLLM)
-    const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
-    const bool needs_workspace = !is_pow_2 || num_experts > 256;
-    const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
-
-    // Manage internal allocations if caller didn't provide
-    bool own_token_expert_indices = false;
-    bool own_softmax_workspace = false;
-
-    if (token_expert_indices == nullptr) {
-        cudaMalloc(&token_expert_indices, num_tokens * topk * sizeof(int));
-        own_token_expert_indices = true;
-    }
-
-    if (needs_workspace && softmax_workspace == nullptr) {
-        cudaMalloc(&softmax_workspace, workspace_size * sizeof(float));
-        own_softmax_workspace = true;
-    }
-
-    // Call async version
-    topk_softmax_async(
-        topk_weights, topk_indices, token_expert_indices,
-        gating_output, softmax_workspace,
-        num_tokens, num_experts, topk, dtype, renormalize, stream);
-
-    // Synchronize and cleanup internal allocations
+    
+    // Cleanup internal allocations
     cudaStreamSynchronize(stream);
     if (own_token_expert_indices) cudaFree(token_expert_indices);
     if (own_softmax_workspace) cudaFree(softmax_workspace);
