@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compare Baseline Analysis Script
+# Compare Baseline Analysis Script (Unified for NV/DL Platforms)
 #
 # This script runs baseline kernel tests and topk kernel tests,
 # then generates an analysis report comparing the results.
@@ -7,26 +7,39 @@
 # Model: Qwen3-30B-A3B (num_experts=128, topk=8)
 # Test tokens: 1, 4, 256, 1024
 #
-# Prerequisites: Run ./build.sh first to compile the binaries
+# Prerequisites:
+#   - NV: Run ./build.sh nv first
+#   - DL: source SDK env, then run ./build.sh dl first
 #
 # Usage: ./compare_baseline.sh
 
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# Configuration
-ITERS=100
-# Qwen3 默认使用 BF16，GPTQ-Int4 只量化权重，激活值仍然是 BF16
-DTYPE="bf16"
+# ============================================
+# Detect Platform
+# ============================================
+if command -v nvidia-smi &> /dev/null; then
+    PLATFORM="nv"
+elif command -v dlcc &> /dev/null || [ -n "${SDK_DIR:-}" ]; then
+    PLATFORM="dl"
+else
+    echo "Error: Cannot detect platform (neither nvidia-smi nor dlcc found)"
+    echo "For DL platform, please source the SDK environment first"
+    exit 1
+fi
 
-# Qwen3-30B-A3B MoE Configuration
-# - num_experts: 128
-# - num_experts_per_tok (topk): 8
+# ============================================
+# Configuration
+# ============================================
+ITERS=100
+DTYPE="bf16"
 EXPERTS=128
 TOPK=8
 
 echo "=============================================="
 echo "  GPU Kernel Baseline Comparison Analysis"
+echo "  Platform: $PLATFORM"
 echo "  Model: Qwen3-30B-A3B (experts=$EXPERTS, topk=$TOPK)"
 echo "=============================================="
 echo ""
@@ -34,13 +47,13 @@ echo ""
 # Check if binaries exist
 if [ ! -f "build/bench_baseline" ]; then
     echo "Error: build/bench_baseline not found."
-    echo "Please run ./build.sh first."
+    echo "Please run ./build.sh $PLATFORM first."
     exit 1
 fi
 
 if [ ! -f "build/bench_perf" ]; then
     echo "Error: build/bench_perf not found."
-    echo "Please run ./build.sh first."
+    echo "Please run ./build.sh $PLATFORM first."
     exit 1
 fi
 
@@ -50,25 +63,39 @@ fi
 echo "[Step 1/5] Collecting GPU information..."
 echo ""
 
-GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader | head -1)
-GPU_NAME=$(echo $GPU_INFO | cut -d',' -f1 | sed 's/^ *//;s/ *$//')  # Keep spaces in name
-GPU_MEM=$(echo $GPU_INFO | cut -d',' -f2 | tr -d ' ')
-GPU_CC=$(echo $GPU_INFO | cut -d',' -f3 | tr -d ' ')
+if [ "$PLATFORM" = "nv" ]; then
+    # NV platform: query GPU info via nvidia-smi
+    GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader | head -1)
+    GPU_NAME=$(echo $GPU_INFO | cut -d',' -f1 | sed 's/^ *//;s/ *$//')
+    GPU_MEM=$(echo $GPU_INFO | cut -d',' -f2 | tr -d ' ')
+    GPU_CC=$(echo $GPU_INFO | cut -d',' -f3 | tr -d ' ')
 
-echo "GPU: $GPU_NAME"
-echo "Memory: $GPU_MEM"
-echo "Compute Capability: $GPU_CC"
+    # Peak bandwidth from spec
+    if [[ "$GPU_NAME" == *"A40"* ]]; then
+        PEAK_BANDWIDTH_GBPS=696
+    elif [[ "$GPU_NAME" == *"A100"* ]]; then
+        PEAK_BANDWIDTH_GBPS=1555
+    else
+        PEAK_BANDWIDTH_GBPS=500
+    fi
+    echo "GPU: $GPU_NAME"
+    echo "Memory: $GPU_MEM"
+    echo "Compute Capability: $GPU_CC"
+    echo "Peak Memory Bandwidth: ${PEAK_BANDWIDTH_GBPS} GB/s (from spec)"
 
-# A40 bandwidth (from NVIDIA spec sheet)
-if [[ "$GPU_NAME" == *"A40"* ]]; then
-    PEAK_BANDWIDTH_GBPS=696
-elif [[ "$GPU_NAME" == *"A100"* ]]; then
-    PEAK_BANDWIDTH_GBPS=1555
-else
-    # Default estimate for other GPUs
-    PEAK_BANDWIDTH_GBPS=500
+elif [ "$PLATFORM" = "dl" ]; then
+    # DL platform: hardcoded hardware info
+    GPU_NAME="ks38"
+    GPU_MEM="64 GB"
+    PEAK_BANDWIDTH_GBPS=409.6
+    BF16_TFLOPS_WITHOUT_SPARSITY=70
+    BF16_TFLOPS_WITH_SPARSITY=140
+
+    echo "Device: $GPU_NAME"
+    echo "Memory: $GPU_MEM"
+    echo "Peak Memory Bandwidth: ${PEAK_BANDWIDTH_GBPS} GB/s"
+    echo "BF16 Tensor TFLOPs: ${BF16_TFLOPS_WITHOUT_SPARSITY} (W/O Sparsity) / ${BF16_TFLOPS_WITH_SPARSITY} (W/ Sparsity)"
 fi
-echo "Peak Memory Bandwidth: ${PEAK_BANDWIDTH_GBPS} GB/s (from spec)"
 echo ""
 
 # ============================================
@@ -132,9 +159,6 @@ echo "[Step 4/5] Calculating theoretical values..."
 echo ""
 
 # Data sizes (bytes)
-# Input: tokens * experts * 2 (fp16)
-# Output: tokens * topk * 4 (float) + tokens * topk * 4 (int) + tokens * topk * 4 (source_rows)
-
 calc_data_size() {
     local tokens=$1
     local experts=$EXPERTS
@@ -145,18 +169,16 @@ calc_data_size() {
     echo $total_bytes
 }
 
-# Calculate for each token count
 DATA_1_BYTES=$(calc_data_size 1)
 DATA_4_BYTES=$(calc_data_size 4)
 DATA_256_BYTES=$(calc_data_size 256)
 DATA_1024_BYTES=$(calc_data_size 1024)
 
-# Theoretical transfer time (nanoseconds) with formatting
+# Theoretical transfer time (nanoseconds)
 calc_theoretical_ns() {
     local bytes=$1
     local bandwidth=$PEAK_BANDWIDTH_GBPS
     local raw=$(echo "scale=3; $bytes / $bandwidth" | bc)
-    # Add leading zero if needed
     if [[ "$raw" == .* ]]; then
         raw="0$raw"
     fi
@@ -174,19 +196,15 @@ echo "Token=256:  Data size = $DATA_256_BYTES bytes, Theoretical transfer = $THE
 echo "Token=1024: Data size = $DATA_1024_BYTES bytes, Theoretical transfer = $THEORY_1024_NS ns"
 echo ""
 
-# Calculate bandwidth utilization with proper formatting
+# Calculate bandwidth utilization
 calc_bw_util() {
     local data_bytes=$1
     local time_us=$2
     local peak_bw=$PEAK_BANDWIDTH_GBPS
-    # Effective BW (GB/s) = data_bytes / (time_us * 1000)
-    # Utilization = effective_bw / peak_bw * 100
     local raw=$(echo "scale=4; $data_bytes / $time_us / 1000 / $peak_bw * 100" | bc)
-    # Format: add leading zero if needed, limit to 2 decimal places
     if [[ "$raw" == .* ]]; then
         raw="0$raw"
     fi
-    # Round to 2 decimal places using printf
     printf "%.2f" "$raw"
 }
 
@@ -195,7 +213,7 @@ BW_UTIL_4=$(calc_bw_util $DATA_4_BYTES $TOPK_4_TIME_US)
 BW_UTIL_256=$(calc_bw_util $DATA_256_BYTES $TOPK_256_TIME_US)
 BW_UTIL_1024=$(calc_bw_util $DATA_1024_BYTES $TOPK_1024_TIME_US)
 
-# Calculate percentages with proper scale
+# Calculate percentages
 FIXED_PCT_1=$(echo "scale=1; ${RW_TIME_US} / ${TOPK_1_TIME_US} * 100" | bc)
 COMPUTE_PCT_1=$(echo "scale=1; (${TOPK_1_TIME_US} - ${RW_TIME_US}) / ${TOPK_1_TIME_US} * 100" | bc)
 COMPUTE_TIME_1=$(echo "scale=2; ${TOPK_1_TIME_US} - ${RW_TIME_US}" | bc)
@@ -217,11 +235,11 @@ TIME_RATIO_4=$(echo "scale=2; ${TOPK_4_TIME_US} / ${TOPK_1_TIME_US}" | bc)
 TIME_RATIO_256=$(echo "scale=2; ${TOPK_256_TIME_US} / ${TOPK_1_TIME_US}" | bc)
 TIME_RATIO_1024=$(echo "scale=2; ${TOPK_1024_TIME_US} / ${TOPK_1_TIME_US}" | bc)
 
-# For "差了 X 倍" calculation: target_data / current_data
-TARGET_DATA_BYTES=$(echo "scale=0; $PEAK_BANDWIDTH_GBPS / 2 * $RW_TIME_US * 1000" | bc)  # bytes needed for 50% BW
+# For 50% BW target calculation
+TARGET_DATA_BYTES=$(echo "scale=0; $PEAK_BANDWIDTH_GBPS / 2 * $RW_TIME_US * 1000" | bc)
 RATIO_TO_TARGET=$(echo "scale=1; $TARGET_DATA_BYTES / $DATA_1024_BYTES" | bc)
 
-# Calculate effective bandwidth (GB/s) with formatting
+# Calculate effective bandwidth
 calc_effective_bw() {
     local data_bytes=$1
     local time_us=$2
@@ -242,8 +260,12 @@ EFF_BW_1024=$(calc_effective_bw $DATA_1024_BYTES $TOPK_1024_TIME_US)
 # ============================================
 echo "[Step 5/5] Generating analysis report..."
 
-cat > compare_baseline.md << EOF
-# GPU Kernel Baseline Comparison Analysis
+if [ "$PLATFORM" = "nv" ]; then
+    # NV platform: generate full report with conclusions
+    OUTPUT_FILE="compare_baseline_nv.md"
+
+    cat > $OUTPUT_FILE << EOF
+# GPU Kernel Baseline Comparison Analysis (NV Platform)
 
 ## Test Environment
 
@@ -450,14 +472,100 @@ TopK (experts=${EXPERTS}, topk=${TOPK}, dtype=${DTYPE}):
 *Using topk_softmax_async() for pure kernel timing*
 EOF
 
+elif [ "$PLATFORM" = "dl" ]; then
+    # DL platform: generate placeholder report (to be filled later)
+    OUTPUT_FILE="compare_baseline_dl.md"
+
+    cat > $OUTPUT_FILE << EOF
+# GPU Kernel Baseline Comparison Analysis (DL Platform)
+
+## Test Environment
+
+| Item | Value |
+|------|-------|
+| Device | ${GPU_NAME} |
+| Memory | ${GPU_MEM} |
+| Peak Memory Bandwidth | ${PEAK_BANDWIDTH_GBPS} GB/s |
+| BF16 Tensor TFLOPs | ${BF16_TFLOPS_WITHOUT_SPARSITY} (W/O Sparsity) / ${BF16_TFLOPS_WITH_SPARSITY} (W/ Sparsity) |
+| Test Iterations | ${ITERS} |
+
+## Model Configuration (Qwen3-30B-A3B)
+
+| Parameter | Value |
+|-----------|-------|
+| num_experts | ${EXPERTS} |
+| topk (num_experts_per_tok) | ${TOPK} |
+| dtype | ${DTYPE} |
+
+## Baseline Kernel Results
+
+| Kernel | Average Time (us) | Description |
+|--------|------------------|-------------|
+| empty_kernel | ${EMPTY_TIME_US} | Pure GPU launch + event overhead |
+| minimal_rw_kernel | ${RW_TIME_US} | Launch + minimal memory access |
+
+## TopK Kernel Results (Pure Kernel Time)
+
+| Tokens | Data Size (bytes) | Theoretical Transfer (ns) | Actual Time (us) | BW Utilization |
+|--------|------------------|--------------------------|------------------|----------------|
+| 1 | ${DATA_1_BYTES} | ${THEORY_1_NS} | ${TOPK_1_TIME_US} | ${BW_UTIL_1}% |
+| 4 | ${DATA_4_BYTES} | ${THEORY_4_NS} | ${TOPK_4_TIME_US} | ${BW_UTIL_4}% |
+| 256 | ${DATA_256_BYTES} | ${THEORY_256_NS} | ${TOPK_256_TIME_US} | ${BW_UTIL_256}% |
+| 1024 | ${DATA_1024_BYTES} | ${THEORY_1024_NS} | ${TOPK_1024_TIME_US} | ${BW_UTIL_1024}% |
+
+## Analysis
+
+### Time Breakdown
+
+| Tokens | Total (us) | Fixed (us) | Fixed % | Compute (us) | Compute % |
+|--------|------------|------------|---------|--------------|-----------|
+| 1 | ${TOPK_1_TIME_US} | ${RW_TIME_US} | ${FIXED_PCT_1}% | ${COMPUTE_TIME_1} | ${COMPUTE_PCT_1}% |
+| 4 | ${TOPK_4_TIME_US} | ${RW_TIME_US} | ${FIXED_PCT_4}% | ${COMPUTE_TIME_4} | ${COMPUTE_PCT_4}% |
+| 256 | ${TOPK_256_TIME_US} | ${RW_TIME_US} | ${FIXED_PCT_256}% | ${COMPUTE_TIME_256} | ${COMPUTE_PCT_256}% |
+| 1024 | ${TOPK_1024_TIME_US} | ${RW_TIME_US} | ${FIXED_PCT_1024}% | ${COMPUTE_TIME_1024} | ${COMPUTE_PCT_1024}% |
+
+### Bandwidth Utilization
+
+| Tokens | Effective BW (GB/s) | Utilization |
+|--------|---------------------|-------------|
+| 1 | ${EFF_BW_1} | ${BW_UTIL_1}% |
+| 4 | ${EFF_BW_4} | ${BW_UTIL_4}% |
+| 256 | ${EFF_BW_256} | ${BW_UTIL_256}% |
+| 1024 | ${EFF_BW_1024} | ${BW_UTIL_1024}% |
+
+### Time Ratio (relative to tokens=1)
+
+\`\`\`
+Data ratio:   1 : 4 : 256 : 1024
+Time ratio:   1.00 : ${TIME_RATIO_4} : ${TIME_RATIO_256} : ${TIME_RATIO_1024}
+\`\`\`
+
+## Conclusion
+
+> **Note**: This report is a placeholder. Detailed analysis and conclusions for DL platform
+> will be added after further investigation of the performance characteristics.
+>
+> See \`hardware_perf_factor.sh\` for hardware performance factor analysis that explains
+> the performance differences between DL and NV platforms.
+
+---
+
+*Generated from actual test results on ${GPU_NAME}*
+*Model: Qwen3-30B-A3B (experts=${EXPERTS}, topk=${TOPK})*
+*Using topk_softmax_async() for pure kernel timing*
+EOF
+
+fi
+
 echo ""
 echo "=============================================="
 echo "  Analysis Complete!"
 echo "=============================================="
 echo ""
-echo "Report saved to: compare_baseline.md"
+echo "Report saved to: $OUTPUT_FILE"
 echo ""
 echo "Summary:"
+echo "  Platform: $PLATFORM"
 echo "  Model: Qwen3-30B-A3B (experts=${EXPERTS}, topk=${TOPK})"
 echo "  - Empty kernel (pure overhead): ${EMPTY_TIME_US} us"
 echo "  - Minimal RW kernel: ${RW_TIME_US} us"
@@ -466,5 +574,10 @@ echo "  - TopK (4 tokens):   ${TOPK_4_TIME_US} us  (BW: ${BW_UTIL_4}%)"
 echo "  - TopK (256 tokens): ${TOPK_256_TIME_US} us  (BW: ${BW_UTIL_256}%)"
 echo "  - TopK (1024 tokens):${TOPK_1024_TIME_US} us  (BW: ${BW_UTIL_1024}%)"
 echo ""
-echo "Key Finding: Fixed overhead (~${RW_TIME_US} us) >> Data transfer time (~${THEORY_1_NS} ns for 1 token)"
-echo "Conclusion: Low bandwidth utilization is due to small data size, not kernel implementation."
+
+if [ "$PLATFORM" = "nv" ]; then
+    echo "Key Finding: Fixed overhead (~${RW_TIME_US} us) >> Data transfer time (~${THEORY_1_NS} ns for 1 token)"
+    echo "Conclusion: Low bandwidth utilization is due to small data size, not kernel implementation."
+elif [ "$PLATFORM" = "dl" ]; then
+    echo "Note: DL platform analysis is placeholder. Run hardware_perf_factor.sh for detailed performance analysis."
+fi
