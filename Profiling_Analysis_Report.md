@@ -33,7 +33,7 @@ sudo /usr/local/cuda/bin/ncu --target-processes all \
     --section WarpStateStats \
     --section LaunchStats \
     --csv \
-    ./build/benchmark_topk 128 [1或4] fp16 8
+    ./build/verify_topk 128 [1或4] fp16 8
 ```
 
 ---

@@ -12,7 +12,7 @@ standalone_topk_kernel/
 │   ├── cuda_compat.h       # CUDA兼容性宏
 │   └── cub_helpers.h       # CUB辅助类型
 ├── tests/
-│   └── benchmark_topk.cpp  # 测试和验证程序
+│   └── verify_topk.cpp     # Kernel验证程序
 ├── tools/
 │   └── generate_golden.py  # 用vLLM生成golden数据
 ├── golden/                  # golden数据存储目录
@@ -53,8 +53,8 @@ python tools/generate_golden.py
 
 ```bash
 # 验证kernel抓取是否正确
-./build/benchmark_topk 64 4 fp16 4 --verify
-./build/benchmark_topk 64 16 fp16 4 --verify
+./build/verify_topk 64 4 fp16 4 --verify
+./build/verify_topk 64 16 fp16 4 --verify
 
 # 成功标准：输出 [PASS] Kernel extraction correct!
 ```

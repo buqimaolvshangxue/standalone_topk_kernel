@@ -4,7 +4,7 @@
 
 set -e
 
-BENCHMARK="./build/benchmark_topk"
+BENCHMARK="./build/verify_topk"
 GOLDEN_DIR="golden"
 
 # Check if benchmark exists

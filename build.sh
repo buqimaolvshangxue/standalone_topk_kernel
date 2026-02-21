@@ -31,8 +31,8 @@ if [ "$PLATFORM" = "nv" ]; then
     echo "Building for NVIDIA platform with NVCC: $NVCC"
     echo "CUDA architecture: sm_$CUDA_ARCH"
 
-    ${NVCC} -o build/benchmark_topk \
-        tests/benchmark_topk.cpp \
+    ${NVCC} -o build/verify_topk \
+        tests/verify_topk.cpp \
         src/topk_softmax.cu \
         -I./src \
         -std=c++17 -O2 \
@@ -71,8 +71,8 @@ elif [ "$PLATFORM" = "dl" ]; then
     echo "Building for DL platform with DLCC: $DLCC"
     echo "SDK_DIR: $SDK_DIR"
 
-    ${DLCC} -o build/benchmark_topk \
-        tests/benchmark_topk.cpp \
+    ${DLCC} -o build/verify_topk \
+        tests/verify_topk.cpp \
         src/topk_softmax.cu \
         -I./src -I${SDK_DIR}/include \
         -L${SDK_DIR}/lib -lcurt \
@@ -119,4 +119,4 @@ else
     exit 1
 fi
 
-echo "Done: build/benchmark_topk, build/bench_perf, build/bench_baseline, build/bench_hardware_perf_factor"
+echo "Done: build/verify_topk, build/bench_perf, build/bench_baseline, build/bench_hardware_perf_factor"
