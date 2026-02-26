@@ -23,168 +23,718 @@
 
 ## 🦅 2. Nsight Systems (`nsys`)：全景分析
 
-不要一上来就硬啃代码，先看时间线。
+当你想知道程序慢在哪，先用 `nsys` 看全局。
 
-### 2.1 常见“病症”速查表
+---
 
-在 GUI 的时间轴上，你可能会看到以下现象，它们分别代表了不同的病症：
+### 2.1 nsys 是什么？
 
-| 现象 (Visual Pattern) | 病症诊断 | 潜在原因 | 解决方案 |
-| :--- | :--- | :--- | :--- |
-| **大量白色空隙 (Gaps)** | **GPU 饥饿 (Starvation)** | CPU 准备数据太慢；API 调用开销太大。 | 使用多流 (Multi-stream)；使用 CUDA Graphs；优化 CPU 逻辑。 |
-| **HtoD 传输条极长** | **PCIe 瓶颈** | 在循环里频繁拷贝数据；数据没在 GPU 上常驻。 | 减少传输次数；使用 Pinned Memory (`cudaMallocHost`)；批处理传输。 |
-| **细碎的 Kernel** | **启动开销过大** | 每个 Kernel 跑太快 (<10us)，导致启动时间 > 运行时间。 | Kernel Fusion (内核融合)；增大 Batch Size。 |
-| **OS Runtime 条很长** | **调度延迟** | 操作系统在忙着上下文切换。 | 绑核 (CPU Affinity)；检查其他进程干扰。 |
+**nsys 是一个”宏观”分析工具，用于观察程序的整体运行情况。**
 
-### 2.2 NVTX：给时间轴加“书签” (强烈推荐)
+| 问题 | nsys 能回答 |
+|------|------------|
+| 程序慢在 CPU 还是 GPU？ | 看时间轴上 CPU/GPU 的比例 |
+| 有没有”气泡”（GPU 空闲）？ | 看 GPU 行有没有空隙 |
+| 内存拷贝花了多少时间？ | 看 HtoD/DtoH 条的长度 |
+| 哪个 kernel 最耗时？ | 看 kernel 条的长度排序 |
 
-在茫茫时间轴中找自己的函数就像大海捞针。**NVTX** 是官方提供的“挂钩”工具。
+**什么时候用 nsys？**
+1. **第一步**：用 `nsys` 看全局，找到瓶颈在哪
+2. **第二步**：用 `ncu` 深入分析那个瓶颈 kernel
+
+---
+
+### 2.2 nsys 的工作原理
+
+#### Trace 机制（不是 Profile！）
+
+**nsys 是”旁观者”，被动记录事件，不干预程序运行。**
+
+```
+程序正常运行 → nsys 在旁边记录 → 生成时间轴
+```
+
+#### 与 ncu 的核心区别
+
+| | nsys | ncu |
+|--|------|-----|
+| **机制** | Trace（追踪） | Profile（采样） |
+| **是否重放** | ❌ 不重放 | ✅ 多次重放 |
+| **开销** | 2-5% | 10-100 倍 |
+| **共享环境** | ✅ 完全可用 | ⚠️ 需谨慎 |
+| **关注点** | CPU/GPU 交互 | kernel 内部 |
+
+**nsys 没有重放机制！程序跑一次就完成采集。**
+
+---
+
+### 2.3 核心概念：Trace
+
+#### 什么是 Trace？
+
+**Trace 是”追踪哪些事件”的配置。**
+
+```
+nsys profile --trace=cuda,osrt,nvtx ./app
+                        └─────┬─────┘
+                          追踪哪些事件
+```
+
+#### 可追踪的事件类型
+
+| Trace 类型 | 含义 | 包含内容 |
+|-----------|------|---------|
+| `cuda` | CUDA API | cudaMalloc, cudaMemcpy, kernel launch 等 |
+| `osrt` | OS Runtime | CPU 线程调度、系统调用 |
+| `nvtx` | NVTX 标签 | 用户自定义的标记（推荐） |
+| `cudnn` | cuDNN | 卷积等深度学习操作 |
+| `cublas` | cuBLAS | 矩阵乘法等线性代数 |
+| `nvmpi` | NVML | GPU 功耗、温度等 |
+
+#### 常用组合
+
+```bash
+# 最常用：看 CUDA + CPU + 自定义标签
+nsys profile --trace=cuda,osrt,nvtx ./app
+
+# 只看 CUDA（文件最小）
+nsys profile --trace=cuda ./app
+
+# 深度学习训练
+nsys profile --trace=cuda,osrt,nvtx,cudnn,cublas ./app
+```
+
+---
+
+### 2.4 核心概念：Timeline
+
+#### 什么是 Timeline？
+
+**Timeline 是时间轴，显示程序运行过程中各组件的活动。**
+
+```
+时间轴结构：
+├── Processes（进程）
+│   └── Threads（线程）
+│       ├── OS Runtime（CPU 系统调用）
+│       ├── CUDA API（CUDA 函数调用）
+│       └── CUDA HW（GPU 硬件活动）
+│           ├── Compute（kernel 执行）
+│           └── Memory（内存拷贝）
+```
+
+#### 时间轴各行含义
+
+| 行 | 含义 | 关注点 |
+|----|------|--------|
+| **OS Runtime** | CPU 在做什么 | 系统调用、线程调度 |
+| **CUDA API** | CUDA 函数调用 | API 耗时、调用频率 |
+| **Compute** | GPU 计算 | kernel 执行时间 |
+| **Memory** | 内存传输 | HtoD/DtoH 拷贝时间 |
+
+#### NVTX：给时间轴加”书签”
+
+在茫茫时间轴中找自己的函数就像大海捞针。**NVTX** 是官方提供的标记工具。
 
 ```cpp
 #include <nvtx3/nvToolsExt.h>
 
 void train_step() {
-    nvtxRangePushA("Train Step");  // <--- 在时间轴上画一个大色块
+    nvtxRangePushA(“Train Step”);  // <--- 在时间轴上画一个色块
     kernel_A<<<...>>>();
     kernel_B<<<...>>>();
     nvtxRangePop();                // <--- 色块结束
 }
 ```
-*编译时需链接库：`-lnvToolsExt` (部分新版 CUDA 只需 include 头文件即可)*
+*编译时需链接库：`-lnvToolsExt`（部分新版 CUDA 只需 include 头文件）*
 
-### 2.4 Nsight Systems (`nsys`) 到底能看啥？(实战案例)
+---
 
-很多新手觉得 `nsys` 只是看个红绿条，没啥用。**错！大错特错！**
+### 2.5 实战：bench_perf 例子
 
-在 90% 的性能优化案例中，**瓶颈根本不在 Kernel 内部，而在 Kernel 外面。** 这时候 `ncu` 是瞎子，只有 `nsys` 能救命。
+#### 程序执行流程
 
-#### 案例 1：显存拷贝地狱 (The Copy Hell)
-*   **现象**: 在 `nsys` 时间轴上，你看到 Compute（计算）条很短，但 `MemCpy (HtoD)` 和 `MemCpy (DtoH)` 的条极长，而且非常密集。
-*   **诊断**: 你在 `for` 循环里频繁地把数据在 CPU 和 GPU 之间搬运。
-*   **后果**: GPU 计算 1ms，搬数据花了 10ms。这也是为什么你优化 Kernel 没用的原因——**路都在路上耽误了**。
-*   **图示**: `[HtoD] [Kernel] [DtoH] ... [HtoD] [Kernel] [DtoH]`
+```bash
+./build/bench_perf 128 1 bf16 8 1
+# 参数含义: experts=128, tokens=1, dtype=bf16, topk=8, iters=1
+```
 
-#### 案例 2：CPU 拖后腿 (CPU Bound)
-*   **现象**: GPU 的时间轴上有巨大的**空隙 (Gaps)**。两个 Kernel 之间隔了很久。
-*   **诊断**: CPU 在准备下一个 Batch 的数据太慢了（比如在做图片解码），导致 GPU 饿得发慌。
-*   **这叫**: **GPU Starvation (GPU 饥饿)**。此时你去优化 GPU 代码毫无意义，得去优化刚才那个 Python DataLoader。
+**程序内部执行流程：**
+```
+1. 初始化数据
+2. Warmup: kernel 调用 10 次（预热，不计入时间）
+3. 正式测试: kernel 调用 1 次（计时，由第 5 个参数控制）
+4. 输出平均时间
+```
 
-#### 案例 3：API 启动延迟 (Launch Latency)
-*   **现象**: 你的 Kernel 运行只需要 5us (微秒)，但时间轴上显示 `cudaLaunchKernel` 这个 API 调用花了 10us。
-*   **诊断**: **任务太碎了**。
-*   **比喻**: 就像送快递，每次只送一颗螺丝钉，送一次就要填一次单子（API开销）。
-*   **解法**: 把小任务合并成大任务 (Kernel Fusion)，或者用 CUDA Graph 一次性提交。
+**总共调用 kernel：10 + 1 = 11 次**
 
-> **结论**: 即使 `ncu` 全线飘红，你也必须**先看 `nsys`**。如果 GPU 只有 20% 的时间在干活，那你把 Kernel 优化快 10 倍，整体程序也只能快 18%。
+#### nsys 的行为
 
-### 2.5 常用命令 (Linux 服务器端)
-| :--- | :--- | :--- |
-| **标准体检 (推荐)** | `nsys profile --trace=cuda,osrt,nvtx -o report ./app` | 追踪 CUDA API、操作系统调度、NVTX 标签。最常用。 |
-| **定点抓取** | `nsys profile --delay=10 --duration=5 -o report ./app` | 运行 10秒后，只抓取 5秒 数据。避免文件过大。 |
-| **Python 分析** | `nsys profile --python-backtrace=cuda python train.py` | 能够看到 PyTorch/TensorFlow 到底在哪行 Python 代码调用的 GPU。 |
-| **只看统计** | `nsys profile --stats=true ./app` | 此时不生成 `rep` 文件，直接在终端打印 Top 10 耗时内核。快速排查用。 |
-| **多 GPU 过滤** | `nsys profile --cuda-devices=0,1 ./app` | 只追踪 0 号和 1 号卡。 |
+```bash
+nsys profile --trace=cuda,osrt -o report ./build/bench_perf 128 1 bf16 8 1
+```
+
+**nsys 行为：**
+1. 程序正常运行（几乎无额外开销）
+2. nsys 记录所有 CUDA API 和 OS 事件
+3. 生成 `report.nsys-rep` 文件
+
+**重要：nsys 不重放，程序只跑一次！**
+
+#### 用 `--stats` 快速查看
+
+```bash
+nsys profile --stats=true ./build/bench_perf 128 1 bf16 8 1
+```
+
+**终端输出示例：**
+```
+Time (%)  Total Time   Instances  Avg         Min         Max         Name
+--------  -----------  ---------  ----------  ----------  ----------  ----------
+   85.2%    15.234 us         11    1.385 us    1.234 us    1.567 us  topkGatingSoftmax
+    8.3%     1.485 us          3  495.000 ns  234.000 ns  890.000 ns  cudaMalloc
+    6.5%     1.162 us          2  581.000 ns  456.000 ns  706.000 ns  cudaMemcpy
+```
+
+---
+
+### 2.6 参数详解
+
+#### `--trace`：追踪哪些事件
+
+```bash
+--trace=cuda              # 只追踪 CUDA
+--trace=cuda,osrt         # CUDA + OS
+--trace=cuda,osrt,nvtx    # CUDA + OS + NVTX（推荐）
+```
+
+#### `--delay` / `--duration`：时间窗口控制
+
+```bash
+--delay=10      # 程序启动后 10 秒开始记录
+--duration=5    # 只记录 5 秒
+```
+
+**适用场景：**
+- 程序很长，只想分析某个阶段
+- 避免 `.nsys-rep` 文件过大
+
+#### `-o`：输出文件名
+
+```bash
+-o report      # 生成 report.nsys-rep
+```
+
+#### `--stats`：终端输出统计
+
+```bash
+--stats=true   # 在终端打印统计信息
+```
+
+#### `--cuda-devices`：指定 GPU
+
+```bash
+--cuda-devices=0     # 只追踪 0 号卡
+--cuda-devices=0,1   # 追踪 0 和 1 号卡
+```
+
+---
+
+### 2.7 输出解读
+
+#### 时间轴常见模式
+
+| 现象 | 诊断 | 原因 | 解决方案 |
+|------|------|------|----------|
+| **大量空隙 (Gaps)** | GPU 饥饿 | CPU 准备数据太慢 | 多流、CUDA Graphs |
+| **HtoD 传输条极长** | PCIe 瓶颈 | 频繁拷贝数据 | Pinned Memory、批处理 |
+| **细碎的 Kernel** | 启动开销大 | kernel 太小 (<10us) | Kernel Fusion |
+| **OS Runtime 条很长** | 调度延迟 | 系统上下文切换 | 绑核、检查干扰 |
+
+#### 实战案例
+
+**案例 1：显存拷贝地狱**
+- **现象**: Compute 条很短，但 `MemCpy (HtoD)` 条极长
+- **诊断**: 频繁在 CPU 和 GPU 之间搬运数据
+- **后果**: GPU 计算 1ms，搬数据花了 10ms
+- **图示**: `[HtoD] [Kernel] [DtoH] ... [HtoD] [Kernel] [DtoH]`
+
+**案例 2：CPU 拖后腿**
+- **现象**: GPU 时间轴上有巨大的空隙
+- **诊断**: CPU 准备数据太慢（如图片解码）
+- **结论**: 优化 GPU 代码无意义，先优化 CPU/数据加载
+
+**案例 3：API 启动延迟**
+- **现象**: kernel 运行 5us，但 `cudaLaunchKernel` 花了 10us
+- **诊断**: 任务太碎了
+- **解法**: Kernel Fusion 或 CUDA Graph
+
+> **结论**: 如果 GPU 只有 20% 的时间在干活，kernel 优化快 10 倍，整体也只能快 18%。
+
+---
+
+### 2.8 命令速查表
+
+| 场景 | 命令 |
+|------|------|
+| **标准体检** | `nsys profile --trace=cuda,osrt,nvtx -o report ./app` |
+| **只看统计** | `nsys profile --stats=true ./app` |
+| **定点抓取** | `nsys profile --delay=10 --duration=5 -o report ./app` |
+| **指定 GPU** | `nsys profile --cuda-devices=0 -o report ./app` |
+| **Python 分析** | `nsys profile --trace=cuda,nvtx --python-backtrace=cuda python train.py` |
+
+---
+
+### 2.9 常见问题
+
+**Q: nsys 和 ncu 先用哪个？**
+A: **先用 nsys**。nsys 看全局，找到瓶颈；再用 ncu 深入分析。
+
+**Q: `.nsys-rep` 文件太大？**
+A:
+1. 用 `--duration` 限制时长
+2. 用 `--delay` 跳过初始化
+3. 用 `--trace=cuda` 只追踪核心事件
+
+**Q: 如何在 GUI 中查看？**
+A:
+```bash
+# 生成文件
+nsys profile -o report ./app
+
+# 本地 GUI 打开
+nsys-ui report.nsys-rep
+```
+
+**Q: nsys 会影响程序性能吗？**
+A: 几乎不会。开销只有 2-5%，可以在生产环境使用。
+
+**Q: 如何对比优化前后？**
+A:
+```bash
+# 生成 baseline
+nsys profile -o baseline ./app_before
+
+# 生成优化后
+nsys profile -o optimized ./app_after
+
+# 在 GUI 中对比
+nsys-ui baseline.nsys-rep
+# 然后导入 optimized.nsys-rep
+```
 
 ---
 
 ## 🔬 3. Nsight Compute (`ncu`)：深度解剖
 
-当你确定了 `topk_kernel` 是瓶颈，用 `ncu` 把它切片研究。
+当你确定了某个 kernel 是瓶颈，用 `ncu` 分析它内部的执行细节。
 
-### 3.1 核心指标字典 (Metric Dictionary)
+---
 
-`ncu` 的数据多到让人恐惧。看这个表，只关注最致命的指标：
+### 3.1 ncu 是什么？
 
-| 领域 | 关键指标 (Metric) | 理想值 (Good) | 糟糕值 (Bad) | 含义与通俗解释 |
-| :--- | :--- | :--- | :--- | :--- |
-| **瓶颈总览** | **Speed of Light (SOL)** | > 60% | < 30% | **SM SOL** 高 = 算力瓶颈；**Memory SOL** 高 = 带宽瓶颈。如果双低，说明在空转（Latency Bound）。 |
-| **内存** | **DRAM Throughput** | > 70% | < 10% | **显存带宽利用率**。越高越好。低说明数据没喂饱。 |
-| **内存** | **L2 Cache Hit Rate** | > 50% | -- | **L2 缓存命中率**。Hit Rate 越高，也就越少去读慢吞吞的 DRAM。 |
-| **内存** | **Coalesced Efficiency** | 100% | < 50% | **合并访问效率**。这是**新手最容易犯的错**。GPU 一次读32字节，你只用了4字节？那就是 12.5% 的效率。浪费带宽。 |
-| **计算** | **SM Efficiency** | > 80% | < 40% | SM 真的在忙着算数吗？还是被别的什么卡住了？ |
-| **调度** | **Theoretical Occupancy** | > 75% | < 50% | **理论最大载客量**。如果低，通常是因为你用了太多的 **寄存器 (Registers)** 或 **共享内存 (Shared Mem)**，导致 SM 放不下更多线程。 |
-| **调度** | **Achieved Occupancy** | 接近理论值 | 远低于理论值 | **实际载客量**。如果远低于理论值，说明发生了严重的 **Tail Effect (尾部效应)** 或流水线停滞。 |
-| **代码** | **Branch Divergence** | 0% | > 20% | **分支发散**。同一个 Warp 里的线程走了不同的 `if-else` 路径。除了必须的逻辑，应尽量避免。 |
+**ncu 是一个”微观”分析工具，用于深入分析单个 kernel 的执行情况。**
 
-### 3.2 停滞原因 (Stall Reasons) —— 为什么线程不动了？
+| 问题 | ncu 能回答 |
+|------|-----------|
+| kernel 执行时间是多少？ | Duration |
+| 内存带宽跑满了吗？ | Memory Throughput |
+| 计算单元跑满了吗？ | Compute Throughput |
+| 为什么线程在等待？ | Warp State Statistics |
 
-这是 `ncu` 最有价值的图表之一 (Warp State Statistics)。
+**什么时候用 ncu？**
+1. 先用 `nsys` 找到瓶颈 kernel
+2. 再用 `ncu` 深入分析这个 kernel
 
-| 停滞代码 | 含义 (The Why) | 如何解决 (The Fix) |
-| :--- | :--- | :--- |
-| **Long Scoreboard** | **等数据**。试图从 Global Memory 读数据，但还没回来。 | 见效最快。优化合并访问；使用 L2 预取；增加计算密度以掩盖延迟。 |
-| **Math Pipe Throttle** | **算不过来**。数学运算单元 (FMA, ALU) 已经塞满了。 | 减少数学指令；降低精度 (FP16/BF16)；使用 Tensor Cores。 |
-| **Barrier** | **等队友**。`__syncthreads()` 卡住。 | 检查是否存在个别线程跑得特别慢 (Load Imbalance)；检查分支发散。 |
-| **MIO Throttle** | **接口拥堵**。Shared Memory 或 Texture 读写太频繁。 | 减少 Shared Memory 冲突 (Bank Conflicts)。 |
+---
 
-### 3.3 `ncu` 命令速查手册
+### 3.2 ncu 的工作原理
 
-⚠️ **高危提醒**：不要直接运行 `ncu ./app`。它会让程序慢 100 倍。**必须**使用过滤器。
+#### 两个独立的概念
 
-| 场景 | 命令示例 | 解释 |
-| :--- | :--- | :--- |
-| **精准打击 (Top 1)** | `ncu -k "softmax" --set full -o result ./app` | `-k`: 正则匹配 Kernel 名。<br>`--set full`: 收集全指标 (推荐)。 |
-| **轻量分析** | `ncu -k "softmax" --section SpeedOfLight ./app` | `--section`: 只收集特定板块，速度快。适合快速验证。 |
-| **狙击模式 (查指标)** | `ncu --metrics gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed ./app` | `--metrics`: 只查这一个特定的指标 (显存带宽利用率)。不用跑几分钟的全量分析。 |
-| **对比优化前后** | `ncu -k "softmax" --import baseline.ncu-rep ./app` | 直接在运行时对比基准文件，输出 diff 结果。 |
-| **多次重放控制** | `ncu -k "softmax" --launch-count 1 ./app` | 默认 `ncu` 会重放 Kernel 数十次。加上这个只抓一次，防卡死。 |
-| **导出 CSV** | `ncu --csv --page raw -k "softmax" ./app > out.csv` | 导出为 Excel 可读的格式，方便做报表。 |
-| **指定显卡** | `ncu --target-processes all --devices 0 ./app` | 只分析 0 号卡上的进程。 |
+**理解 ncu 必须区分两个概念：**
 
-> 💡 **如何查找指标名？**
-> 运行 `ncu --query-metrics` 可以列出几千个指标。
-> 常用: `gpu__dram_throughput` (显存), `sm__throughput` (计算), `sm__warps_active` (占用率)。
+| 概念 | 含义 | 控制方式 |
+|------|------|----------|
+| **抓取次数** | 抓取多少次不同的 kernel 调用 | `-c` 参数 |
+| **重放次数 (passes)** | 对每次调用重放多少次来采集指标 | 由 Section 数量决定 |
 
+#### 重放机制 (passes)
 
-### 3.4 怎么只查一个指标？(保姆级教程)
+**ncu 不能一次采集所有指标，需要多次运行同一个 kernel。**
 
-你可能会觉得：“我不想看那么多废话，我就想知道 **显存带宽** 到底跑了多少 GB/s，或者利用率是百分之几，怎么弄？”
+```
+第 1 次重放 kernel → 采集指标组 A
+第 2 次重放 kernel → 采集指标组 B
+第 3 次重放 kernel → 采集指标组 C
+...
+```
 
-这两个步骤教给你：
+你看到的输出：
+```
+==PROF== Profiling “topkGatingSoftmax”: 0%....50%....100% - 8 passes
+```
 
-#### 第一步：找到指标的名字
-NVIDIA 的指标名字特别长，没人记得住。你可以用 `--query-metrics` 配合 `grep` 来搜。
+**`8 passes` = 这 1 次 kernel 调用被重放了 8 次！**
+
+#### 为什么需要重放？
+
+GPU 的硬件性能计数器数量有限，不能同时采集所有指标。ncu 需要”分批”采集，每次重放只采集一部分。
+
+#### 实际执行次数计算
+
+```
+抓取次数 × 重放次数 = 实际执行次数
+
+例 1：-c 1（抓 1 次），8 passes
+      1 × 8 = 8 次实际执行
+
+例 2：-c 5（抓 5 次），8 passes
+      5 × 8 = 40 次实际执行
+
+例 3：不加参数（抓 11 次），8 passes
+      11 × 8 = 88 次实际执行
+```
+
+#### 如何减少重放次数？
+
+**`-c` 无法控制重放次数！重放次数由 Section 数量决定。**
 
 ```bash
-# 假设你想找 "DRAM" (显存) 相关的指标
-ncu --query-metrics | grep dram
+# 默认 4 个 Section → 约 8 passes
+ncu -s 10 -c 1 ./app
+
+# 只看 1 个 Section → 更少 passes（更快）
+ncu -s 10 -c 1 --section SpeedOfLight ./app
 ```
-*你会看到一大堆输出，比如 `gpu__dram_throughput`...*
 
-#### 第二步：使用 --metrics 参数
-把找到的名字复制下来，填到命令里。
+**Section 越少 → passes 越少 → 越快！**
 
-**例子 1：看百分比 (利用率)**
+---
+
+### 3.3 核心概念：Section
+
+#### 什么是 Section？
+
+**Section 是一组相关指标的集合，类似”体检套餐”。**
+
+```
+ncu 采集的数据
+├── Section: SpeedOfLight（利用率概览）
+│   ├── Duration
+│   ├── Memory Throughput
+│   ├── Compute Throughput
+│   └── ...
+├── Section: Occupancy（占用率）
+│   ├── Theoretical Occupancy
+│   ├── Achieved Occupancy
+│   └── ...
+└── Section: LaunchStats（启动参数）
+    ├── Grid Size
+    ├── Block Size
+    └── ...
+```
+
+#### 默认启用的 Section
+
+**不加 `--section` 参数时，ncu 默认只采集 4 个 Section：**
+
+| Section | 含义 | 启用 |
+|---------|------|------|
+| `SpeedOfLight` | GPU 利用率概览 | ✅ 默认 |
+| `LaunchStats` | 启动参数（grid/block） | ✅ 默认 |
+| `Occupancy` | 占用率 | ✅ 默认 |
+| `WorkloadDistribution` | 负载分布 | ✅ 默认 |
+
+#### 所有可用的 Section
+
 ```bash
-# pct_of_peak_sustained_elapsed = 也就是 "跑到了理论峰值的百分之多少"
-ncu --metrics gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed ./my_app
+# 查看所有 Section
+ncu --list-sections
 ```
-*   **输出结果**: 会显示 `85.2%`。说明你把显存带宽吃到了 85%。
 
-**例子 2：看绝对值 (GB/s)**
+| Section | 含义 | 默认启用 | 用途 |
+|---------|------|----------|------|
+| `SpeedOfLight` | GPU 利用率概览 | ✅ | 快速看瓶颈 |
+| `LaunchStats` | 启动参数 | ✅ | grid/block 大小 |
+| `Occupancy` | 占用率 | ✅ | 线程是否跑满 |
+| `WorkloadDistribution` | 负载分布 | ✅ | SM/内存活跃度 |
+| `MemoryWorkloadAnalysis` | 内存负载分析 | ❌ | 详细带宽分析 |
+| `ComputeWorkloadAnalysis` | 计算负载分析 | ❌ | 详细计算分析 |
+| `WarpStateStats` | Warp 状态统计 | ❌ | 为什么线程等待 |
+| `InstructionStats` | 指令统计 | ❌ | 指令分布 |
+| `SourceCounters` | 源码级计数器 | ❌ | 定位热点代码 |
+| `SchedulerStats` | 调度统计 | ❌ | 调度效率 |
+
+#### 不同场景选哪些 Section？
+
+| 想分析什么 | 推荐的 Section |
+|-----------|---------------|
+| 快速看整体瓶颈 | 默认 4 个（不加参数） |
+| 内存带宽问题 | `SpeedOfLight,MemoryWorkloadAnalysis` |
+| 计算利用率问题 | `SpeedOfLight,ComputeWorkloadAnalysis` |
+| 线程等待问题 | `Occupancy,WarpStateStats` |
+| 定位热点代码 | `SourceCounters`（需编译时加 `-lineinfo`） |
+
+---
+
+### 3.4 核心概念：Metrics
+
+#### 什么是 Metrics？
+
+**Metrics 是单个具体指标，Section 是 Metrics 的集合。**
+
+```
+Section: SpeedOfLight
+├── Metric: DRAM Frequency      ← 单个指标
+├── Metric: SM Frequency        ← 单个指标
+├── Metric: Elapsed Cycles      ← 单个指标
+├── Metric: Duration            ← 单个指标
+├── Metric: Memory Throughput   ← 单个指标
+└── ...
+```
+
+#### Section vs Metrics
+
+| | Section | Metrics |
+|--|---------|---------|
+| **粒度** | 粗（一组指标） | 细（单个指标） |
+| **用法** | `--section SpeedOfLight` | `--metrics gpu__dram_throughput...` |
+| **场景** | 日常分析 | 脚本自动化、精确控制 |
+
+**日常用 `--section` 就够了！**
+
+---
+
+### 3.5 实战：bench_perf 例子
+
+#### 程序执行流程
+
+假设你有一个 benchmark 程序：
+
 ```bash
-# bytes_per_second = "每秒传多少字节"
-ncu --metrics dram__bytes.sum.per_second ./my_app
+./build/bench_perf 128 1 bf16 8 1
+# 参数含义: experts=128, tokens=1, dtype=bf16, topk=8, iters=1
 ```
-*   **输出结果**: 会显示 `800 Gbytes/second`。
 
-### 3.5 常见问题 (FAQ)
+**程序内部执行流程：**
+```
+1. 初始化数据
+2. Warmup: kernel 调用 10 次（预热，不计入时间）
+3. 正式测试: kernel 调用 1 次（计时，由第 5 个参数控制）
+4. 输出平均时间
+```
 
-**Q: 为什么 `ncu` 跑得这么慢？**
-A: 因为它要“重放” (Replay) Kernel。比如你要采集 10 种指标，它可能就要把同一个 Kernel 重复运行 10-20 次，每次只采集一种数据。
-**解法**：尽量锁定特定的 Kernel (`-k`)，或者使用狙击模式只查特定指标。
+**总共调用 kernel：10 + 1 = 11 次**
 
-**Q: 我在 GUI 里看不到 C++ 源码？**
-A: 99% 是因为编译时没加 `-lineinfo`。请在 `nvcc` 编译命令中加上这个标志。
+#### ncu 的行为
 
-**Q: `nsys` 里的 GPU 时间轴全是空白？**
-A: 可能是 Kernel 跑得太快了 (< 2us)。使用 CUDA Graph 或者增加 workload。也可能是你根本没点 GPU 选项开关 (默认是开的 `--trace=cuda`)。
+如果不加任何参数：
+```
+ncu ./build/bench_perf 128 1 bf16 8 1
 
-**Q: 遇到 `ERR_NVGPUCTRPERM` 报错怎么办？**
-A: 这是最常见的权限问题。分析 GPU 计数器通常需要 Root 权限。
-*   **解法 1 (临时)**: 在命令前加 `sudo` (如果你有权限)：`sudo ncu ...`
-*   **解法 2 (永久)**: 让管理员加载内核模块选项 `options nvidia NVreg_RestrictProfilingToAdminUsers=0`。
-*   **解法 3 (无奈)**: 如果你是租的显卡（如 Colab/Kaggle）且没有 root，那通常就**用不了 ncu**，只能用 nsys 看时间线。
+行为：
+1. 程序调用 kernel 11 次
+2. ncu 对每次调用都进行 profile
+3. 输出 11 次结果（刷屏！）
+```
+
+#### 用 `-s` 和 `-c` 控制
+
+```bash
+ncu -s 10 -c 1 ./build/bench_perf 128 1 bf16 8 1
+```
+
+**参数含义：**
+- `-s 10`：**跳过**前 10 次 kernel 调用（不分析）
+- `-c 1`：**只抓取 1 次**（抓取后就结束，不再分析后面的）
+
+**重要：`-c 1` 是"总共只抓 1 次"，不是"每次都抓"！**
+
+**图示：**
+```
+程序调用:  K1  K2  ...  K10 | K11 |
+           └─── 跳过 ───┘   └抓1次┘
+              warmup         ↑
+                         只抓这一次
+```
+
+**常用组合：**
+
+| 命令 | 效果 | 适用场景 |
+|------|------|----------|
+| `-s 10 -c 1` | 跳过 10 次 warmup，只抓第 11 次 | 跳过 warmup（推荐） |
+| `-s 0 -c 1` | 不跳过，只抓第 1 次 | 抓第一次调用 |
+| `-s 10 -c 5` | 跳过 10 次，抓第 11-15 次（共 5 次） | 想看多次结果 |
+
+---
+
+### 3.6 参数详解
+
+#### `-s` / `--launch-skip`：跳过次数
+
+```bash
+-s 10    # 跳过前 10 次 kernel 调用
+```
+
+#### `-c` / `--launch-count`：抓取次数
+
+```bash
+-c 1     # 只抓取 1 次
+-c 5     # 抓取 5 次
+```
+
+#### `--section`：选择分析模块
+
+```bash
+# 只看 SpeedOfLight（最快）
+ncu -s 10 -c 1 --section SpeedOfLight ./app
+
+# 看多个 Section
+ncu -s 10 -c 1 --section SpeedOfLight,Occupancy ./app
+
+# 不加 --section = 默认 4 个 Section
+ncu -s 10 -c 1 ./app
+```
+
+#### `--kernel-name`：过滤 kernel
+
+```bash
+# 只分析名字包含 “topkGatingSoftmax” 的 kernel
+ncu --kernel-name “topkGatingSoftmax” -s 10 -c 1 ./app
+```
+
+#### `-o`：生成 UI 文件
+
+```bash
+# 不加 -o：只输出到终端
+ncu -s 10 -c 1 ./app
+
+# 加 -o：生成 .ncu-rep 文件
+ncu -o profile -s 10 -c 1 ./app
+# → 生成 profile.ncu-rep
+
+# 用 UI 打开
+ncu-ui profile.ncu-rep
+```
+
+**注意：推荐 `-c 1`，否则文件很大，UI 打开很慢。**
+
+---
+
+### 3.7 输出解读（完整版）
+
+#### SpeedOfLight Section（10 个指标）
+
+| 指标 | 单位 | 含义 | 理想值 |
+|------|------|------|--------|
+| `DRAM Frequency` | GHz | 显存频率 | - |
+| `SM Frequency` | GHz | SM 频率 | - |
+| `Elapsed Cycles` | cycle | 总周期数 | - |
+| `Duration` | us | **kernel 执行时间** | 越低越好 |
+| `Memory Throughput` | % | **内存综合利用率** | > 70% |
+| `DRAM Throughput` | % | 显存带宽利用率 | > 70% |
+| `L1/TEX Cache Throughput` | % | L1 缓存利用率 | - |
+| `L2 Cache Throughput` | % | L2 缓存利用率 | - |
+| `SM Active Cycles` | cycle | SM 活跃周期 | - |
+| `Compute (SM) Throughput` | % | **计算利用率** | > 70% |
+
+#### LaunchStats Section（8 个核心指标）
+
+| 指标 | 含义 | 关注点 |
+|------|------|--------|
+| `Grid Size` | block 数量 | 太小 → 利用率低 |
+| `Block Size` | 每 block 线程数 | 建议 128-256 |
+| `Threads` | 总线程数 | Grid × Block |
+| `Registers Per Thread` | 每线程寄存器数 | 太多 → occupancy 降低 |
+| `Static Shared Memory Per Block` | 静态共享内存 | 太多 → occupancy 降低 |
+| `Dynamic Shared Memory Per Block` | 动态共享内存 | - |
+| `# SMs` | GPU 的 SM 数量 | 硬件参数 |
+| `Waves Per SM` | 每 SM 的 wave 数 | 太少 → 利用率低 |
+
+#### Occupancy Section（8 个指标）
+
+| 指标 | 含义 | 理想值 |
+|------|------|--------|
+| `Theoretical Occupancy` | 理论占用率 | > 75% |
+| `Achieved Occupancy` | **实际占用率** | 接近理论值 |
+| `Theoretical Active Warps per SM` | 理论活跃 warp 数 | - |
+| `Achieved Active Warps Per SM` | 实际活跃 warp 数 | - |
+| `Block Limit SM` | SM 最多容纳 block 数 | - |
+| `Block Limit Registers` | 寄存器限制的 block 数 | - |
+| `Block Limit Shared Mem` | 共享内存限制的 block 数 | - |
+| `Block Limit Warps` | warp 限制的 block 数 | - |
+
+#### WorkloadDistribution Section（10 个指标）
+
+| 指标 | 含义 |
+|------|------|
+| `Average DRAM Active Cycles` | 平均 DRAM 活跃周期 |
+| `Total DRAM Elapsed Cycles` | 总 DRAM 周期 |
+| `Average L1 Active Cycles` | 平均 L1 活跃周期 |
+| `Total L1 Elapsed Cycles` | 总 L1 周期 |
+| `Average L2 Active Cycles` | 平均 L2 活跃周期 |
+| `Total L2 Elapsed Cycles` | 总 L2 周期 |
+| `Average SM Active Cycles` | 平均 SM 活跃周期 |
+| `Total SM Active Cycles` | 总 SM 周期 |
+| `Average SMSP Active Cycles` | 平均 SMSP 活跃周期 |
+| `Total SMSP Active Cycles` | 总 SMSP 周期 |
+
+#### 性能问题诊断
+
+| 现象 | 可能原因 | 建议 |
+|------|----------|------|
+| Memory Throughput < 30% | 内存带宽没跑满 | 检查合并访问、增加并行度 |
+| Compute Throughput < 30% | 计算单元闲置 | 增加计算密度、检查分支发散 |
+| Grid Size = 1 | 只启动了 1 个 block | 增加 batch size 或数据并行 |
+| Achieved << Theoretical Occupancy | 实际占用远低于理论 | 检查负载均衡、同步开销 |
+
+---
+
+### 3.8 命令速查表
+
+| 场景 | 命令 |
+|------|------|
+| **快速看 kernel 时间** | `ncu -s 10 -c 1 ./app` |
+| **只看利用率** | `ncu -s 10 -c 1 --section SpeedOfLight ./app` |
+| **生成 UI 文件** | `ncu -o profile -s 10 -c 1 ./app` |
+| **只看特定 kernel** | `ncu --kernel-name “topkGatingSoftmax” -s 10 -c 1 ./app` |
+| **分析内存瓶颈** | `ncu -s 10 -c 1 --section SpeedOfLight,MemoryWorkloadAnalysis ./app` |
+| **分析线程等待** | `ncu -s 10 -c 1 --section Occupancy,WarpStateStats ./app` |
+
+---
+
+### 3.9 常见问题
+
+**Q: 报错 `ERR_NVGPUCTRPERM`？**
+A: 需要 root 权限，命令前加 `sudo`。
+
+**Q: ncu 太慢？**
+A:
+1. 用 `-c 1` 限制抓取次数
+2. 用 `--section SpeedOfLight` 只看关键指标
+3. 用 `--kernel-name` 只分析目标 kernel
+
+**Q: 输出太多刷屏？**
+A: 用 `-s` 和 `-c` 控制只抓一次。
+
+**Q: GUI 看不到源码？**
+A: 编译时加 `-lineinfo` 参数。
+
+**Q: 如何对比优化前后？**
+A:
+```bash
+# 生成 baseline
+ncu -o baseline -s 10 -c 1 ./app_before
+
+# 生成优化后
+ncu -o optimized -s 10 -c 1 ./app_after
+
+# 在 GUI 中对比
+ncu-ui baseline.ncu-rep
+# 然后导入 optimized.ncu-rep 进行对比
+```
 
 ---
 
