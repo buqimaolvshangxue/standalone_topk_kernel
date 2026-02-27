@@ -29,15 +29,60 @@ grep -i duration ncu_output.txt
 
 ### 术语约定（避免混淆）
 
-- **Kernel Launch（本文约定）**：Host 侧 `kernel<<<...>>>(...)` 的提交/入队（enqueue），也叫 **host launch overhead**。
+#### CUDA 执行模型
+
+- **Grid / Block / Thread**：CUDA 的三级并行层次。一次 kernel launch 产生一个 **Grid**；Grid 由若干 **Block**（= CTA）组成；每个 Block 包含若干 **Thread**。例如 `dim3 block_dim(32, 4)` 表示每个 Block 有 128 个 Thread。
+- **CTA（Cooperative Thread Array）**：就是一个 **thread block** 的硬件层面叫法。同一个 CTA 内的线程共享 shared memory，可以用 `__syncthreads()` 同步。GPU 按 CTA 粒度分配寄存器/shared memory/调度槽位。文中"分配 CTA 资源"可直接理解为"给 block 分配寄存器/shared memory 并准备调度"。
+- **Warp**：GPU 调度和执行的最小单位，固定 32 个连续 thread。同一 Warp 内的 thread 以 SIMT（Single Instruction, Multiple Threads）方式执行同一条指令。一个 128-thread 的 Block 有 4 个 Warp。
+- **SM（Streaming Multiprocessor）**：GPU 上的计算核心单元。每个 SM 有自己的寄存器文件、shared memory、L1 cache、warp scheduler。多个 CTA 可以同时驻留在同一个 SM 上（取决于资源占用），由 SM 的 warp scheduler 交替调度执行。
+- **Stream**：CUDA 的命令队列。同一 stream 内的命令按提交顺序在 GPU 上依次执行；不同 stream 的命令可以并发。`kernel<<<grid, block, 0, stream>>>` 中最后一个参数就是 stream。
+- **Kernel Launch（本文约定）**：Host 侧 `kernel<<<...>>>(...)` 的提交/入队（enqueue），也叫 **host launch overhead**。Host 把 launch 命令入队后立即返回，不等待 GPU 执行完成。
 - **GPU 侧启动延迟**：GPU 收到 launch 命令后，到真正开始执行 kernel 前的解析、资源分配、调度准备。
 - **Kernel 执行时间**：kernel 在 SM 上实际执行（含数据读写与计算）的时间。
-- **CTA（Cooperative Thread Array）**：就是一个 `thread block`；文中“分配 CTA 资源”可直接理解为“给 block 分配寄存器/shared memory 并准备调度”。
-- **CUDA Context**：进程在某张 GPU 上的运行环境（地址空间、模块状态、stream/event 状态等）；通常首次创建，后续复用。
-- **模块装载（Module Load）**：driver 把 kernel 对应模块准备成“可执行状态”，并把代码放到 GPU 显存中的代码区。
-- **PTX JIT**：当没有可直接执行的目标机器码时，driver 在运行时把 PTX 编译成当前 GPU 的机器码（SASS），再执行。
 
-> 后文只写 "launch" 时，默认指第一项（Host 侧 enqueue），不等于 GPU 执行时间。
+#### 存储层次
+
+- **寄存器（Register）**：每个 thread 私有的最快存储，延迟 ~0 cycle。数量有限（每 SM 约 64K 个 32-bit 寄存器），多个 CTA 共享寄存器文件。
+- **Shared Memory**：同一 CTA 内所有 thread 共享的片上高速存储（延迟 ~20 cycle），可用于 thread 间通信。本 kernel 未使用 shared memory（纯寄存器 + warp shuffle）。
+- **L1 Cache**：SM 上的片上缓存（~128KB/SM），缓存 global memory 数据，延迟约 20-30 cycle。
+- **L2 Cache**：GPU 芯片级共享缓存（~50MB），所有 SM 共用，延迟约 100-200 cycle。
+- **HBM（High Bandwidth Memory）**：GPU 显存（主存），容量大（~80GB）但延迟高（300-500 cycle），带宽约 3 TB/s。也叫 DRAM / Global Memory。
+- **Pinned Memory（锁页内存）**：Host 侧通过 `cudaMallocHost` 分配的页锁定内存，不会被 OS 换出到磁盘，GPU 可通过 DMA 直接访问，是 Host↔GPU 数据传输的高速通道。
+- **I-Cache（Instruction Cache）**：SM 上的指令缓存，缓存从显存代码区取回的 kernel 机器码，避免每次取指都访问显存。
+
+#### 计算与通信原语
+
+- **ALU（Arithmetic Logic Unit）**：执行加减乘除、比较等基本算术和逻辑运算的硬件单元。
+- **SFU（Special Function Unit）**：GPU 上专门执行 `exp()`、`sin()`、`cos()`、`rsqrt()` 等超越函数的硬件单元。比 ALU 慢，但比软件模拟快得多。
+- **Warp Shuffle**：同一 Warp 内 thread 之间直接交换寄存器数据的硬件指令（如 `__shfl_xor_sync`），不需要经过 shared memory 或 global memory，延迟极低（~1 cycle）。本 kernel 用它做 sub-warp reduce（width=16，即 16 个 thread 一组协作归约）。
+- **Coalesced Access（合并访问）**：同一 Warp 的 thread 访问连续的内存地址时，硬件可以把多个 thread 的请求合并成一次内存事务，大幅提高带宽利用率。反之（散乱访问）会产生多次独立事务。
+- **VPT（Values Per Thread）**：本 kernel 的模板参数，表示每个 thread 负责处理多少个值。128 experts / 16 threads = VPT=8。
+
+#### Host↔GPU 通信
+
+- **PCIe / NVLink**：Host CPU 与 GPU 之间的物理互连总线。PCIe 是通用接口（~64 GB/s），NVLink 是 NVIDIA 私有高带宽互连（~900 GB/s）。命令和数据都通过它们传输。
+- **DMA（Direct Memory Access）**：硬件直接在内存之间传输数据，不需要 CPU 逐字节搬运。GPU Front End 通过 DMA 从 host pinned memory 拉取命令。
+- **Pushbuffer**：Host driver 在 pinned memory 中维护的命令缓冲区。CPU 侧把 launch 命令写入 pushbuffer，GPU Front End 通过 DMA 主动拉取（pull 模型）。
+- **Doorbell**：Host 写完 pushbuffer 后，通过写一个特殊的 MMIO 寄存器通知 GPU"有新命令了"。GPU Front End 收到 doorbell 后开始拉取命令。
+- **GPU Front End**：GPU 内部的命令处理器，负责从 pushbuffer 拉取命令、解析、分发到对应硬件单元（如 CTA 分配器、SM 等）。
+
+#### 编译与二进制
+
+- **CUDA Context**：进程在某张 GPU 上的运行环境（地址空间、模块状态、stream/event 状态等）；通常首次创建，后续复用。
+- **模块装载（Module Load）**：driver 把 kernel 对应模块准备成"可执行状态"，并把代码放到 GPU 显存中的代码区。
+- **PTX**：NVIDIA 的中间表示（类似汇编），与具体 GPU 架构无关。编译器先把 CUDA C++ 编译成 PTX。
+- **SASS**：GPU 的原生机器码，与具体架构绑定（如 sm_80、sm_90）。是 GPU 实际执行的指令。
+- **PTX JIT**：当没有可直接执行的目标机器码（SASS）时，driver 在运行时把 PTX 编译成当前 GPU 的 SASS，再执行。
+- **fatbin / cubin**：CUDA 可执行文件中嵌入的 GPU 二进制格式。fatbin 可包含多个架构的 cubin + PTX，运行时自动选择匹配的版本。
+
+#### 性能测量
+
+- **NCU（Nsight Compute）**：NVIDIA 的 GPU kernel 性能分析工具，可以精确测量单个 kernel 的执行时间（Duration）、内存吞吐量、计算利用率等，不包含 launch 开销和 event 开销。
+- **cudaEvent**：CUDA 的 GPU 时间戳机制。`cudaEventRecord` 在 stream 中插入一个打点命令，GPU 执行到时记录高精度时钟。`cudaEventElapsedTime` 计算两个 event 在 GPU 时间线上的间隔。
+- **cudaEventSynchronize**：Host 阻塞等待直到指定 event 在 GPU 上被执行完毕。
+- **cudaStreamSynchronize**：Host 阻塞等待直到指定 stream 中所有已提交的命令在 GPU 上全部执行完毕。
+
+> 后文只写 "launch" 时，默认指 Kernel Launch（Host 侧 enqueue），不等于 GPU 执行时间。
 
 **这三个概念的关系与目的（首次调用常见）**：
 1. 先有 `CUDA Context`（先把运行环境建好）。
@@ -206,7 +251,8 @@ Host Launch 流程（统一样式）
     [S2-3] 构造并提交 Launch 命令（grid/block/参数指针/stream）
         │
         ▼
-    [S2-4] 写入 GPU 命令队列（位于 GPU 显存）+ Doorbell 通知
+    [S2-4] 写入 Host Pinned Memory 中的 Pushbuffer + Doorbell 通知
+           - 命令缓冲区位于 host 锁页内存，GPU Front End 通过 PCIe/NVLink DMA 拉取
         │
         ▼
     [S2-5] Host 立即返回（异步，不等待 kernel 完成）
@@ -216,15 +262,15 @@ Host Launch 流程（统一样式）
 1. `[S2-1]` Host runtime 打包 launch 元数据。
 2. `[S2-2]` 首次调用分支：可能触发 Context/JIT/模块装载。
 3. `[S2-3]` 构造 launch 命令并提交到 driver/runtime 队列。
-4. `[S2-4]` 写入 GPU 显存中的命令队列并 doorbell 通知。
+4. `[S2-4]` 写入 host pinned memory 中的 pushbuffer 并 doorbell 通知。
 5. `[S2-5]` Host 返回（异步语义，不等执行完成）。
 
 **阶段输出：**
 - GPU 端已经“看得见”一条待执行 launch 命令，等待命令处理器消费。
 
 **关键澄清：**
-- 这里写入 GPU 的主要是**命令/参数元数据 +（仅首次）代码装载结果**。
-- 其中命令写入目标是 **GPU 显存中的命令队列**（不是 CPU 内存队列）。
+- 这里写入的主要是**命令/参数元数据 +（仅首次）代码装载结果**。
+- 其中命令写入目标是 **host pinned memory（锁页内存）中的 pushbuffer**，GPU Front End 通过 PCIe/NVLink DMA 从中拉取命令。
 - `gating/weights/indices` 这类业务数据不在该阶段搬运（应在 launch 前已位于 device memory）。
 - 首次调用的代码装载目标位置是 GPU 显存中的代码区（Driver 管理），不是业务 tensor 缓冲区。
 
@@ -246,7 +292,7 @@ GPU 端命令处理流程（统一样式）
     [S3-0] GPU 收到 Doorbell
         │
         ▼
-    [S3-1] 命令获取（从 GPU 显存中的命令队列读取 launch 命令）
+    [S3-1] 命令获取（GPU Front End 通过 PCIe/NVLink 从 host pushbuffer 拉取 launch 命令）
         │
         ▼
     [S3-2] 命令解析（函数地址 / grid / block / 参数指针）
@@ -266,9 +312,9 @@ GPU 端命令处理流程（统一样式）
 
 **子步骤（S3-x，细粒度版）：**
 1. `[S3-1] 命令读取`  
-   - 做什么：从 GPU 显存命令队列读取本次 launch 描述符。  
-   - 输入/输出：输入是队列项；输出是可解析的 launch 包。  
-   - 为什么耗时：需要走 L2/DRAM 读取路径。
+   - 做什么：GPU Front End 通过 PCIe/NVLink DMA 从 host pinned memory 的 pushbuffer 拉取本次 launch 描述符。  
+   - 输入/输出：输入是 pushbuffer 中的队列项；输出是可解析的 launch 包。  
+   - 为什么耗时：需要走 PCIe/NVLink DMA 读取路径。
 2. `[S3-2] 命令解析`  
    - 做什么：解析 kernel 入口、grid/block、参数地址、stream 顺序关系。  
    - 输入/输出：输入是 launch 包；输出是“可调度任务描述”。  
@@ -331,10 +377,10 @@ Kernel 在 SM 上执行
     │  4.1 数据加载 (Data Loading)                                        │
     │  ──────────────────────────                                         │
     │                                                                     │
-    │  每个 thread 加载 64 个 expert 值（每个 token）：                   │
-    │  - 从 Global Memory 读取 gating[token_id * 64 + expert_id]         │
+    │  16 个 thread 协作加载 128 个 expert 值（每个 thread 加载 VPT=8 个）： │
+    │  - 从 Global Memory 读取 gating[token_id * 128 + expert_id]         │
     │  - 通过 L2 Cache → L1 Cache → 寄存器                                │
-    │  - 数据量：1024 tokens × 64 experts × 2 bytes (fp16) = 128 KB      │
+    │  - 数据量：1 token × 128 experts × 2 bytes (bf16) = 256 bytes       │
     │                                                                     │
     │  内存访问模式：                                                     │
     │  - Coalesced access（合并访问）                                     │
@@ -350,23 +396,23 @@ Kernel 在 SM 上执行
     │  ────────────────────────────────────                               │
     │                                                                     │
     │  a) 找最大值（Max Reduction）：                                     │
-    │     thread_max = max(row_chunk[0..63])                              │
-    │     warp_max = shuffle_xor_reduce(thread_max)                       │
+    │     thread_max = max(row_chunk[0..7])   // 每个 thread VPT=8       │
+    │     group_max = shuffle_xor_reduce(thread_max, width=16)            │
     │                                                                     │
     │  b) 计算 exp 和求和：                                               │
     │     row_sum = 0                                                     │
-    │     for (i in 0..63):                                               │
-    │         row_chunk[i] = exp(row_chunk[i] - warp_max)                 │
+    │     for (i in 0..7):          // VPT=8                              │
+    │         row_chunk[i] = exp(row_chunk[i] - group_max)                │
     │         row_sum += row_chunk[i]                                     │
-    │     warp_sum = shuffle_xor_reduce(row_sum)                          │
+    │     group_sum = shuffle_xor_reduce(row_sum, width=16)               │
     │                                                                     │
     │  c) 归一化：                                                        │
-    │     for (i in 0..63):                                               │
-    │         row_chunk[i] /= warp_sum                                    │
+    │     for (i in 0..7):                                                │
+    │         row_chunk[i] /= group_sum                                   │
     │                                                                     │
     │  计算特点：                                                         │
     │  - 纯寄存器操作，非常快                                             │
-    │  - Warp shuffle 进行 reduce，无需 shared memory                     │
+    │  - Warp shuffle 进行 reduce（width=16，即 sub-warp reduce）          │
     │  - exp() 使用 SFU（Special Function Unit）                          │
     │                                                                     │
     └─────────────────────────────────────────────────────────────────────┘
@@ -377,19 +423,19 @@ Kernel 在 SM 上执行
     │  4.3 TopK 选择 (TopK Selection)                                     │
     │  ──────────────────────────                                         │
     │                                                                     │
-    │  迭代 k 次（k=4），每次找一个最大值：                               │
+    │  迭代 k 次（k=8），每次找一个最大值：                               │
     │                                                                     │
-    │  for (k_idx = 0; k_idx < 4; k_idx++) {                              │
-    │      // a) 在本 thread 的数据中找最大值                             │
+    │  for (k_idx = 0; k_idx < 8; k_idx++) {                              │
+    │      // a) 在本 thread 的数据中找最大值（VPT=8 个元素）              │
     │      max_val = row_chunk[0]                                         │
-    │      expert = 0                                                     │
-    │      for (i in 1..63):                                              │
+    │      expert = start_col                                             │
+    │      for (i in 0..7):                                               │
     │          if (row_chunk[i] > max_val):                               │
     │              max_val = row_chunk[i]                                 │
     │              expert = i                                             │
     │                                                                     │
-    │      // b) 在 warp 范围内找全局最大值                               │
-    │      warp_reduce_argmax(max_val, expert)                            │
+    │      // b) 在 thread group 范围内找全局最大值（width=16）            │
+    │      shuffle_xor_reduce_argmax(max_val, expert, width=16)           │
     │                                                                     │
     │      // c) 记录结果                                                 │
     │      if (thread_group_idx == 0):                                    │
@@ -401,9 +447,8 @@ Kernel 在 SM 上执行
     │  }                                                                  │
     │                                                                     │
     │  计算特点：                                                         │
-    │  - 4 次迭代，每次 64 次比较 + 1 次 warp reduce                      │
-    │  - 总计 ~256 次比较操作                                             │
-    │  - 纯 ALU 操作，非常快                                              │
+    │  - 8 次迭代，每次每 thread 8 次比较 + 1 次 sub-warp reduce（width=16）│
+    │  - 纯 ALU 操作（+ shuffle），非常快                                  │
     │                                                                     │
     └─────────────────────────────────────────────────────────────────────┘
         │
@@ -414,9 +459,10 @@ Kernel 在 SM 上执行
     │  ──────────────────────────                                         │
     │                                                                     │
     │  写入两个输出数组：                                                 │
-    │  - weights[1024 × 4] = 16 KB (float)                               │
-    │  - indices[1024 × 4] = 16 KB (int)                                 │
-    │  - 总计 32 KB                                                       │
+    │  - weights[1 × 8] = 32 bytes (float)                               │
+    │  - indices[1 × 8] = 32 bytes (int)                                 │
+    │  - source_rows[1 × 8] = 32 bytes (int)                             │
+    │  - 总计：96 bytes                                                     │
     │                                                                     │
     │  写入模式：                                                         │
     │  - Coalesced write（合并写入）                                      │
@@ -456,57 +502,58 @@ Kernel 在 SM 上执行
 Kernel 完成与同步流程（统一样式）
 ────────────────────────────────
 
-    最后一批 block 指令执行完
+    阶段 4 执行期间，资源回收已在持续进行：
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  5.0 Per-CTA 资源回收（与阶段 4 交织发生）                         │
+    │  - 每个 CTA 执行完毕后，其占用的寄存器/shared memory/调度槽位       │
+    │    立即释放，可被同一 SM 上的后续 CTA 或其他 kernel 复用             │
+    │  - 这是流式/增量的，不是所有 block 完成后的一次性批量操作           │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    最后一个 CTA 执行完毕
         │
         ▼
     ┌─────────────────────────────────────────────────────────────────────┐
     │  5.1 完成判定 (Completion Point)                                    │
-    │  - 等待所有已 launch 的 block 全部结束                              │
-    │  - 只有最慢的 block 结束后，kernel 才算真正完成                      │
+    │  - 所有已 launch 的 CTA 全部结束                                    │
+    │  - 只有最慢的 CTA 结束后，kernel 才算真正完成                       │
+    │  - 此时所有 per-CTA 资源已在先前逐步回收完毕                        │
     └─────────────────────────────────────────────────────────────────────┘
         │
         ▼
     ┌─────────────────────────────────────────────────────────────────────┐
-    │  5.2 资源回收 (Resource Reclaim)                                    │
-    │  - 回收寄存器 / shared memory / 调度槽位                             │
-    │  - 使 SM 资源可被后续 kernel 复用                                    │
-    └─────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │  5.3 完成发布 (Completion Publish)                                  │
+    │  5.2 完成发布 (Completion Publish)                                  │
     │  - 更新 stream 中该 kernel 的完成状态                                │
     │  - 若有 cudaEvent，写入 event 时间戳                                 │
     │  - 若 CPU 正在等待，同步原语据此解除等待                              │
-    │  - 这是对 Host 可见的“完成发布点”                                    │
+    │  - 这是对 Host 可见的"完成发布点"                                    │
     └─────────────────────────────────────────────────────────────────────┘
 ```
 
 **子步骤（S5-x）：**
-1. `[S5-1]` 完成判定：所有已 launch block 全部结束。
-2. `[S5-2]` 资源回收：寄存器/shared memory/调度槽位可复用。
-3. `[S5-3]` 完成发布：stream/event/等待方看到“已完成”状态。
+1. `[S5-0]` Per-CTA 资源回收（与阶段 4 交织）：每个 CTA 结束后其占用的寄存器/shared memory/调度槽位立即释放。
+2. `[S5-1]` 完成判定：最后一个 CTA 结束，kernel 完成。
+3. `[S5-2]` 完成发布：stream/event/等待方看到"已完成"状态。
 
 **阶段输出：**
 - 对同一 stream 的后续命令，前序 kernel 已完成这一事实可见。
 
 **和第三部分的一一映射：**
-- `S5-1/S5-2/S5-3` <-> `第三部分 2.7 完成同步`。
+- `S5-0/S5-1/S5-2` <-> `第三部分 2.7 完成同步`。
 
-**是否任何 kernel 都需要 5.1/5.2/5.3？**
+**是否任何 kernel 都需要 5.0/5.1/5.2？**
 - 需要。这是 GPU/runtime 的通用收尾逻辑，不是 `topk_softmax` 特有代码。
 
 **`cudaStreamSynchronize(stream)` 到底在等什么？**
-1. 等 `5.1`：所有已 launch 的 block 全部执行完。
-2. 等 `5.2`：相关运行资源完成回收。
-3. 等 `5.3`：完成状态被发布到 stream（必要时 event 时间戳也写入）。
-4. 上述 1~3 都满足后，`cudaStreamSynchronize(stream)` 才返回，`topk_softmax` 才返回。
+1. 等 `5.1`：所有已 launch 的 CTA 全部执行完（per-CTA 资源已在此前逐步回收）。
+2. 等 `5.2`：完成状态被发布到 stream（必要时 event 时间戳也写入）。
+3. 上述 1~2 都满足后，`cudaStreamSynchronize(stream)` 才返回，`topk_softmax` 才返回。
 
 **计时归属：**
 - 该阶段在 GPU 时间线内，计入 `cudaEvent` 的 `ms`（经验量级约 `~0.3-0.5 μs`）。
 
 **源码补充（当前仓库实现）：**
-- `src/topk_softmax.cu:672` 有 `cudaStreamSynchronize(stream)`，因此 `topk_softmax` 返回前会等待“5.1 -> 5.2 -> 5.3”整条链路完成。
+- `src/topk_softmax.cu:672` 有 `cudaStreamSynchronize(stream)`，因此 `topk_softmax` 返回前会等待“5.1 -> 5.2”整条链路完成。
 - 这属于封装层额外语义：底层 kernel launch 仍是异步，封装函数把返回时机改成“完成后再返回”。
 
 ---
@@ -523,14 +570,14 @@ cudaEventCreate(&stop);
 
 // Warmup - 消除首次调用的额外开销
 for (int i = 0; i < warmup; i++) {
-    topk_softmax(...);
+    topk_softmax_async(...);              // 纯异步，无内部同步
 }
 cudaDeviceSynchronize();
 
 // 正式测量
 for (int i = 0; i < iters; i++) {
     cudaEventRecord(start);                    // 记录起点
-    topk_softmax(...);                         // 调用 kernel
+    topk_softmax_async(...);                   // 调用 kernel（纯异步）
     cudaEventRecord(stop);                     // 记录终点
     cudaEventSynchronize(stop);                // 等待完成
 
@@ -544,7 +591,7 @@ for (int i = 0; i < iters; i++) {
 1. `[M-1]` 创建 `start/stop` event（一次性）。
 2. `[M-2]` 执行 warmup（不计入 `total_time_ms`）。
 3. `[M-3]` `cudaEventRecord(start)`：把“开始打点命令”入队。
-4. `[M-4]` 调用 `topk_softmax(...)`：内部走阶段 1~5。
+4. `[M-4]` 调用 `topk_softmax_async(...)`：纯异步 kernel launch，无内部同步。
 5. `[M-5]` `cudaEventRecord(stop)`：把“结束打点命令”入队。
 6. `[M-6]` `cudaEventSynchronize(stop)`：Host 等到 stop 事件真正执行完成。
 7. `[M-7]` `cudaEventElapsedTime(start, stop)`：读取 GPU 时间线间隔并累加。
@@ -559,7 +606,7 @@ for (int i = 0; i < iters; i++) {
 
 ```
 CPU 提交顺序（同一 stream）：
-    record(start) -> topk_softmax(...) -> record(stop)
+    record(start) -> topk_softmax_async(...) -> record(stop)
 
 GPU 看到的时间线：
     [start打点] -> (可能空等) -> 命令处理/启动 -> kernel执行 -> 完成发布 -> (可能空等) -> [stop打点]
@@ -581,10 +628,11 @@ GPU 看到的时间线：
 - `阶段 4`：Kernel 执行（真正算子计算）。
 - `阶段 5`：完成发布（含 event 可见性）。
 - `Event Stop` 打点处理时间。
-- 可能的 GPU 空等时间：
-  由于 `topk_softmax` 内部有 `cudaStreamSynchronize`/可选 `cudaMalloc/cudaFree`，`stop` 打点可能被延后提交，导致两 event 之间出现空等区间。
 
-**所以为什么看起来包住 `topk_softmax(...)`，却不是“只测阶段4”？**
+> 注：`bench_perf` 使用的是 `topk_softmax_async()`，内部无 `cudaStreamSynchronize`，也无 `cudaMalloc/cudaFree`，
+> 因此 start 到 stop 之间不会出现由封装层导致的 GPU 空等间隙。
+
+**所以为什么看起来包住 `topk_softmax_async(...)`，却不是“只测阶段4”？**
 - 因为 event 测的是 start->stop 之间整个 GPU 时间区间，不会自动只截取 kernel 本体。
 
 **如果想更接近“纯阶段4”**：
@@ -605,25 +653,25 @@ GPU 看到的时间线：
 ```
 Warmup（不计时）：
     for i in warmup:
-        topk_softmax(...)
+        topk_softmax_async(...)
     cudaDeviceSynchronize()
 
 正式计时：
-    record(start) -> topk_softmax(...) -> record(stop)
+    record(start) -> topk_softmax_async(...) -> record(stop)
 ```
 
 **这段要回答“Warmup 对你测到的 `ms` 到底影响什么”**：
 - 你的 `ms` 定义是：`ms = T(stop_event_on_gpu) - T(start_event_on_gpu)`，也就是 start/stop 两个 event 在 GPU 时间线上的间隔。
 - Warmup 会影响 `ms` 的部分：首次调用才出现的一次性成本（Context 初始化、模块装载、PTX JIT 等）。这些属于 Host 侧，不会被 event 直接计时；但如果发生在 `start` 到 `stop` 之间，会通过“延迟 launch/stop 提交 -> GPU 空等间隙”抬高前几次 `ms`。
-- Warmup 不会消除的部分：每次调用都发生的开销（GPU 命令处理、kernel 执行、完成发布，以及由封装行为导致的间隙）。
-- 本工程里若每次都传 `token_expert_indices=nullptr`，会每次触发内部 `cudaMalloc/cudaFree`；这类“每次都发生”的成本即使 Warmup 后仍会继续影响 `ms`。
+- Warmup 不会消除的部分：每次调用都发生的开销（GPU 命令处理、kernel 执行、完成发布）。
+- 本工程 `bench_perf` 使用 `topk_softmax_async`，内部无 `cudaMalloc/cudaFree`，因此稳态下无额外分配/释放开销。
 - 一句话：Warmup 主要“去掉首轮偏大值”，不会“去掉稳态每次调用成本”。
 
 **Warmup 细拆（W-x）：**
-1. `[W-1]` 先跑若干次 `topk_softmax`，把一次性路径尽量前置消耗。
+1. `[W-1]` 先跑若干次 `topk_softmax_async`，把一次性路径尽量前置消耗。
 2. `[W-2]` `cudaDeviceSynchronize()`，确保 warmup 的 GPU 工作全部收尾。
 3. `[W-3]` 正式开始 event 计时，只统计稳态区间。
-4. `[W-4]` 若调用形态本身每次都触发分配/同步，Warmup 不会把这些“每次成本”消掉。
+4. `[W-4]` `bench_perf` 使用 `topk_softmax_async`，无内部分配/同步，稳态开销干净。
 
 ---
 
@@ -637,11 +685,11 @@ Warmup（不计时）：
 2. `Event Start`：GPU 打点。
 3. `阶段 3`：GPU 命令处理 + 启动准备 + 取指/I-Cache 装填。
 4. `阶段 4`：Kernel 执行（数据加载 + 计算 + 写回）。
-5. `阶段 5`：完成判定 + 资源回收 + 完成发布。
+5. `阶段 5`：完成判定 + 完成发布（per-CTA 资源回收与阶段 4 交织）。
 6. `Event Stop`：GPU 打点。
 7. 可能还有“间隙”：Host 后续命令提交延迟导致的 GPU 空等时间。
 
-在本仓库里，这个"间隙"常见来源是：`topk_softmax` 内部的 `cudaStreamSynchronize(stream)` 与可选的内部 `cudaMalloc/cudaFree`。
+在本仓库里，`bench_perf` 使用 `topk_softmax_async`，内部无 `cudaStreamSynchronize` 且无 `cudaMalloc/cudaFree`，因此稳态下不存在封装层引入的空等间隙。
 
 > **NCU 实测值 vs cudaEvent 测量值**：
 > - **NCU Duration = 6.56 μs**：纯 kernel 执行时间（阶段 4），不包含 event 开销、启动延迟等
@@ -690,13 +738,13 @@ cudaEvent 测量的总时间（阶段 3+4+5+event）≈ 6.6 μs
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  做什么：                                                                   │
-│  1. 从显存中的命令队列读取命令（~200-400 ns 延迟）                          │
+│  1. GPU Front End 从 host pushbuffer 拉取命令（通过 PCIe/NVLink DMA）       │
 │  2. 解析命令类型和参数                                                      │
 │  3. 读取 kernel 元数据（grid/block 配置等）                                 │
 │  4. 确定需要多少 SM 资源                                                    │
 │                                                                             │
 │  为什么需要这么长时间：                                                     │
-│  - 命令队列在显存中，读取需要访问 DRAM/L2                                   │
+│  - 命令缓冲区在 host 锁页内存中，需通过 PCIe/NVLink DMA 拉取               │
 │  - GPU 是个庞然大物，命令需要在多个硬件单元间传递                           │
 │  - 资源分配需要协商（哪些 SM 空闲？寄存器够用吗？）                          │
 │                                                                             │
@@ -796,25 +844,24 @@ cudaEvent 测量的总时间（阶段 3+4+5+event）≈ 6.6 μs
 │                                                                             │
 │  计算内容：                                                                 │
 │                                                                             │
-│  1. Softmax（每个 token）：                                                 │
-│     - 找 64 个值中的最大值（64 次比较）                                     │
-│     - 计算 64 个 exp（64 次 SFU 操作）                                      │
-│     - 求和（64 次加法）                                                     │
-│     - 归一化（64 次除法）                                                   │
+│  1. Softmax（每个 token，16 个 thread 协作）：                                  │
+│     - 每个 thread 找 VPT=8 个值中的最大值，shuffle reduce 跨 16 threads     │
+│     - 计算 128 个 exp（每 thread 8 个 SFU 操作）                              │
+│     - 求和（每 thread 8 次加法 + shuffle reduce）                            │
+│     - 归一化（每 thread 8 次乘法）                                        │
 │                                                                             │
-│  2. TopK（每个 token，迭代 4 次）：                                         │
-│     - 找最大值（64 次比较）× 4 次 = 256 次比较                              │
-│     - Warp reduce（4 次）                                                   │
-│     - 清除已选值（4 次赋值）                                                │
+│  2. TopK（每个 token，迭代 8 次）：                                        │
+│     - 每次每 thread 扫描 VPT=8 个值 + shuffle reduce 跨 16 threads       │
+│     - 清除已选值（8 次赋值）                                                │
 │                                                                             │
 │  计算量：                                                                   │
-│  - 每个 token：~64 次 exp + ~320 次比较 + ~128 次算术操作                   │
-│  - 1024 个 token：1024 × 上述操作                                          │
+│  - 每个 token：128 次 exp + 多轮 shuffle reduce + ~128 次算术操作          │
+│  - 1 个 token：总计算量很小，主要受延迟主导                              │
 │                                                                             │
 │  计算特点：                                                                 │
 │  - 大部分是 ALU 操作，非常快                                                │
 │  - exp() 使用 SFU，稍慢但可接受                                             │
-│  - Warp shuffle 进行 reduce，无 shared memory 开销                          │
+│  - Warp shuffle 进行 sub-warp reduce（width=16），无 shared memory 开销      │
 │                                                                             │
 │  最低下限：~0.5 μs（假设计算资源无限）                                      │
 │  实际开销：~1-2 μs                                                          │
@@ -864,15 +911,14 @@ cudaEvent 测量的总时间（阶段 3+4+5+event）≈ 6.6 μs
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  做什么：                                                                   │
-│  1. 等待所有 thread block 完成                                              │
-│  2. 释放 SM 资源（寄存器、shared memory）                                   │
+│  1. Per-CTA 资源回收（与阶段 4 交织，每个 CTA 结束即释放）                │
+│  2. 等待最后一个 CTA 完成                                                │
 │  3. 更新 kernel 完成状态                                                    │
 │  4. 如果有 event，写入时间戳                                                │
 │                                                                             │
 │  为什么需要时间：                                                           │
-│  - Block 同步屏障：所有 block 必须完成后 kernel 才算完成                    │
-│  - 最后一个 block 可能因为调度原因稍慢                                      │
-│  - 资源释放需要硬件协调                                                     │
+│  - 最后一个 CTA 可能因为调度原因稍慢                                      │
+│  - 完成状态发布需要硬件协调                                               │
 │                                                                             │
 │  最低下限：~0.2 μs                                                          │
 │  实际开销：~0.3-0.5 μs                                                      │
