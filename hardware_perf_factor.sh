@@ -8,13 +8,15 @@
 #   source /LocalRun/xiaolong.zhu/artifactory/sdk/testenv.sh
 #   source /LocalRun/xiaolong.zhu/artifactory/venv/bin/activate
 #
-# Usage: ./hardware_perf_factor.sh [warmup_iters] [test_iters]
+# Usage: ./hardware_perf_factor.sh [warmup] [iters]
+#   warmup: Number of warmup iterations (default: 100)
+#   iters:  Number of test iterations (default: 100)
 
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # Default parameters
-WARMUP=${1:-20}
+WARMUP=${1:-100}
 ITERS=${2:-100}
 
 # Detect platform

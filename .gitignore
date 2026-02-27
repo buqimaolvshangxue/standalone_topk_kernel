@@ -1,0 +1,25 @@
+# Build output
+build/
+
+# Object files
+*.o
+*.obj
+
+# Static libraries
+*.a
+*.lib
+
+# Profiling outputs
+*.nsys-rep
+*.ncu-rep
+ncu_output.txt
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

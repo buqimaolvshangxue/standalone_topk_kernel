@@ -1,13 +1,13 @@
 #!/bin/bash
 # Performance benchmark for all configurations
-# Usage: ./perf_all.sh [iters] [max_tests]
+# Usage: ./perf_all.sh [warmup] [iters]
 
 set -e
 
 BENCH="./build/bench_perf"
 GOLDEN_DIR="golden"
-ITERS=${1:-100}      # Default 100 iterations per test
-MAX_TESTS=${2:-0}    # Default 0 = run all tests
+WARMUP=${1:-100}     # Default 100 warmup iterations
+ITERS=${2:-100}      # Default 100 test iterations
 
 # Check if benchmark exists
 if [ ! -f "$BENCH" ]; then
@@ -26,16 +26,11 @@ fi
 echo "========================================"
 echo " TopK Kernel Performance Benchmark"
 echo "========================================"
-echo "Iterations per test: $ITERS"
+echo "Warmup: $WARMUP, Iterations: $ITERS"
 echo ""
 
 TOTAL=$(ls -1 ${GOLDEN_DIR}/*.bin | wc -l)
-if [ "$MAX_TESTS" -gt 0 ] && [ "$MAX_TESTS" -lt "$TOTAL" ]; then
-    TOTAL=$MAX_TESTS
-    echo "Found $(ls -1 ${GOLDEN_DIR}/*.bin | wc -l) golden data files, testing first $TOTAL"
-else
-    echo "Found $TOTAL golden data files"
-fi
+echo "Found $TOTAL golden data files"
 echo ""
 
 # Results table
@@ -46,9 +41,6 @@ printf "%s\n" "-----------------------------------------------------------------
 COUNT=0
 for f in ${GOLDEN_DIR}/*.bin; do
     COUNT=$((COUNT + 1))
-    if [ "$MAX_TESTS" -gt 0 ] && [ "$COUNT" -gt "$MAX_TESTS" ]; then
-        break
-    fi
     filename=$(basename "$f" .bin)
     tokens=$(echo "$filename" | sed 's/tokens_\([0-9]*\)_.*/\1/')
     experts=$(echo "$filename" | sed 's/.*experts_\([0-9]*\)_.*/\1/')
@@ -58,7 +50,7 @@ for f in ${GOLDEN_DIR}/*.bin; do
     printf "%-8d %-8d %-6s %-5s " "$experts" "$tokens" "$dtype" "$topk"
 
     # Run benchmark and capture output
-    output=$($BENCH "$experts" "$tokens" "$dtype" "$topk" "$ITERS" 2>&1)
+    output=$($BENCH "$experts" "$tokens" "$dtype" "$topk" "$WARMUP" "$ITERS" 2>&1)
 
     # Parse results
     time_us=$(echo "$output" | grep "Average kernel time:" | awk '{print $4}')

@@ -155,15 +155,15 @@ void train_step() {
 #### 程序执行流程
 
 ```bash
-./build/bench_perf 128 1 bf16 8 1
-# 参数含义: experts=128, tokens=1, dtype=bf16, topk=8, iters=1
+./build/bench_perf 128 1 bf16 8 10 1
+# 参数含义: experts=128, tokens=1, dtype=bf16, topk=8, warmup=10, iters=1
 ```
 
 **程序内部执行流程：**
 ```
 1. 初始化数据
 2. Warmup: kernel 调用 10 次（预热，不计入时间）
-3. 正式测试: kernel 调用 1 次（计时，由第 5 个参数控制）
+3. 正式测试: kernel 调用 1 次（计时）
 4. 输出平均时间
 ```
 
@@ -172,7 +172,7 @@ void train_step() {
 #### nsys 的行为
 
 ```bash
-nsys profile --trace=cuda,osrt -o report ./build/bench_perf 128 1 bf16 8 1
+nsys profile --trace=cuda,osrt -o report ./build/bench_perf 128 1 bf16 8 10 1
 ```
 
 **nsys 行为：**
@@ -185,7 +185,7 @@ nsys profile --trace=cuda,osrt -o report ./build/bench_perf 128 1 bf16 8 1
 #### 用 `--stats` 快速查看
 
 ```bash
-nsys profile --stats=true ./build/bench_perf 128 1 bf16 8 1
+nsys profile --stats=true ./build/bench_perf 128 1 bf16 8 10 1
 ```
 
 **终端输出示例：**
@@ -514,7 +514,7 @@ Section: SpeedOfLight
 假设你有一个 benchmark 程序：
 
 ```bash
-./build/bench_perf 128 1 bf16 8 1
+./build/bench_perf 128 1 bf16 8 10 1
 # 参数含义: experts=128, tokens=1, dtype=bf16, topk=8, iters=1
 ```
 
@@ -532,7 +532,7 @@ Section: SpeedOfLight
 
 如果不加任何参数：
 ```
-ncu ./build/bench_perf 128 1 bf16 8 1
+ncu ./build/bench_perf 128 1 bf16 8 10 1
 
 行为：
 1. 程序调用 kernel 11 次
@@ -543,7 +543,7 @@ ncu ./build/bench_perf 128 1 bf16 8 1
 #### 用 `-s` 和 `-c` 控制
 
 ```bash
-ncu -s 10 -c 1 ./build/bench_perf 128 1 bf16 8 1
+ncu -s 10 -c 1 ./build/bench_perf 128 1 bf16 8 10 1
 ```
 
 **参数含义：**

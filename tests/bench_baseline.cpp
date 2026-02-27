@@ -1,21 +1,21 @@
 /*
  * Baseline Kernel Performance Benchmark
  *
- * Usage: ./bench_baseline <kernel_type> [iters]
+ * Usage: ./bench_baseline <kernel_type> [warmup] [iters]
  *
  * kernel_type:
  *   - empty:  Empty kernel (measures pure launch overhead)
  *   - rw:     Minimal read-write kernel (measures launch + minimal memory access)
  *
- * iters: Number of iterations (default: 100)
+ * warmup: Number of warmup iterations (default: 100)
+ * iters:  Number of test iterations (default: 100)
  *
  * This benchmark uses the SAME testing methodology as bench_perf.cpp:
- * - warmup = 10
  * - cudaEvent timing
  * - Multiple iterations for stable average
  *
- * Example: ./bench_baseline empty 100
- *          ./bench_baseline rw 100
+ * Example: ./bench_baseline empty 100 100
+ *          ./bench_baseline rw 100 100
  */
 
 #include <iostream>
@@ -35,13 +35,14 @@
     } while(0)
 
 void print_usage(const char* prog) {
-    printf("Usage: %s <kernel_type> [iters]\n", prog);
+    printf("Usage: %s <kernel_type> [warmup] [iters]\n", prog);
     printf("  kernel_type: empty | rw\n");
     printf("    empty: Empty kernel (pure launch overhead)\n");
     printf("    rw:    Minimal read-write kernel\n");
-    printf("  iters: Number of iterations (default: 100)\n");
-    printf("\nExample: %s empty 100\n", prog);
-    printf("         %s rw 100\n", prog);
+    printf("  warmup: Number of warmup iterations (default: 100)\n");
+    printf("  iters:  Number of test iterations (default: 100)\n");
+    printf("\nExample: %s empty 100 100\n", prog);
+    printf("         %s rw 100 100\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -51,8 +52,8 @@ int main(int argc, char** argv) {
     }
 
     std::string kernel_type = argv[1];
-    int iters = (argc > 2) ? atoi(argv[2]) : 100;
-    int warmup = 10;  // Same as bench_perf.cpp
+    int warmup = (argc > 2) ? atoi(argv[2]) : 100;
+    int iters = (argc > 3) ? atoi(argv[3]) : 100;
     cudaStream_t stream = 0;  // Default stream
 
     // Validate kernel type

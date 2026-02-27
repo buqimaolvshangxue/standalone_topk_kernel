@@ -12,7 +12,7 @@
 
 ```bash
 cd /LocalRun/xiaolong.zhu/standalone_topk_kernel
-sudo /usr/local/cuda/bin/ncu --set full ./build/bench_perf 128 1 bf16 8 1 2>&1 | tee ncu_output.txt
+sudo /usr/local/cuda/bin/ncu --set full ./build/bench_perf 128 1 bf16 8 10 1 2>&1 | tee ncu_output.txt
 ```
 
 查看 kernel 执行时间：
@@ -21,8 +21,7 @@ grep -i duration ncu_output.txt
 ```
 
 **说明**：
-- `./build/bench_perf 128 1 bf16 8 1` 参数含义：128 experts, 1 token, bf16, topk=8, 1 iteration
-- bench_perf 默认有 10 次 warmup，所以实际会跑 11 次 kernel
+- `./build/bench_perf 128 1 bf16 8 10 1` 参数含义：128 experts, 1 token, bf16, topk=8, warmup=10, iters=1
 - NCU 输出中的 `Duration` 字段就是 kernel 的实际 GPU 执行时间
 
 ---

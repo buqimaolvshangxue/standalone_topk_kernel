@@ -27,7 +27,7 @@ extern "C" {
 // Configuration
 // ============================================
 
-#define PERF_WARMUP_ITERATIONS  20
+#define PERF_WARMUP_ITERATIONS  100
 #define PERF_TEST_ITERATIONS    100
 #define PERF_DATA_SIZE_MB       10      // 10 MB for memory tests
 #define PERF_COMPUTE_ITERATIONS 1000    // Iterations for compute/warp/sync tests

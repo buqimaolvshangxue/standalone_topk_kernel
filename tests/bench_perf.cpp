@@ -1,7 +1,7 @@
 /*
  * Pure Performance Benchmark for TopK Kernel
  *
- * Usage: ./bench_perf <experts> <tokens> <dtype> <topk> [iters]
+ * Usage: ./bench_perf <experts> <tokens> <dtype> <topk> [warmup] [iters]
  *
  * This measures pure kernel execution time:
  * - Warmup runs to eliminate cold-start overhead
@@ -30,13 +30,14 @@
     } while(0)
 
 void print_usage(const char* prog) {
-    printf("Usage: %s <experts> <tokens> <dtype> <topk> [iters]\n", prog);
+    printf("Usage: %s <experts> <tokens> <dtype> <topk> [warmup] [iters]\n", prog);
     printf("  experts: number of experts (e.g., 64, 128, 256)\n");
     printf("  tokens:  number of tokens (e.g., 16, 128, 1024)\n");
     printf("  dtype:   data type (fp32, fp16, bf16)\n");
     printf("  topk:    top-k value (e.g., 2, 4, 6, 8)\n");
-    printf("  iters:   number of iterations (default: 100)\n");
-    printf("\nExample: %s 64 1024 fp16 4 1000\n", prog);
+    printf("  warmup:  number of warmup iterations (default: 100)\n");
+    printf("  iters:   number of test iterations (default: 100)\n");
+    printf("\nExample: %s 64 1024 fp16 4 100 100\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -49,8 +50,8 @@ int main(int argc, char** argv) {
     int tokens = atoi(argv[2]);
     std::string dtype = argv[3];
     int topk = atoi(argv[4]);
-    int iters = (argc > 5) ? atoi(argv[5]) : 100;
-    int warmup = 10;
+    int warmup = (argc > 5) ? atoi(argv[5]) : 100;
+    int iters = (argc > 6) ? atoi(argv[6]) : 100;
 
     printf("=== Pure Kernel Performance Benchmark ===\n");
     printf("Configuration: experts=%d, tokens=%d, dtype=%s, topk=%d\n",

@@ -11,13 +11,25 @@ standalone_topk_kernel/
 │   ├── topk_softmax.h      # 纯CUDA接口声明
 │   ├── cuda_compat.h       # CUDA兼容性宏
 │   └── cub_helpers.h       # CUB辅助类型
+├── baseline_src/
+│   ├── baseline_kernels.cu # 基准测试kernel
+│   └── baseline_kernels.h  # 基准测试接口
+├── perf_factor_src/
+│   ├── hardware_perf_factor_kernels.cu  # 硬件性能因子测试kernel
+│   └── hardware_perf_factor_kernels.h   # 硬件性能因子接口
 ├── tests/
-│   └── verify_topk.cpp     # Kernel验证程序
+│   ├── verify_topk.cpp              # Kernel验证程序
+│   ├── bench_perf.cpp               # TopK性能测试
+│   ├── bench_baseline.cpp           # 基准性能测试
+│   └── bench_hardware_perf_factor.cpp  # 硬件性能因子测试
 ├── tools/
 │   └── generate_golden.py  # 用vLLM生成golden数据
 ├── golden/                  # golden数据存储目录
-│   └── Phase1/             # Phase1快速验证数据
-└── build.sh                # 编译脚本
+├── build.sh                # 编译脚本
+├── perf_all.sh             # 全量性能测试脚本
+├── compare_baseline.sh     # 基准对比分析脚本
+├── hardware_perf_factor.sh # 硬件性能因子测试脚本
+└── verify_all.sh           # 全量验证脚本
 ```
 
 ## 快速开始
@@ -58,6 +70,79 @@ python tools/generate_golden.py
 
 # 成功标准：输出 [PASS] Kernel extraction correct!
 ```
+
+## 性能测试
+
+### 统一参数说明
+
+所有性能测试脚本和程序使用统一的参数格式：
+- `warmup`: 预热迭代次数（默认: 100）
+- `iters`: 测试迭代次数（默认: 100）
+
+### 全量性能测试
+
+```bash
+# 默认: warmup=100, iters=100
+./perf_all.sh
+
+# 自定义参数
+./perf_all.sh 50 200   # warmup=50, iters=200
+```
+
+### 基准对比分析
+
+```bash
+# 默认: warmup=100, iters=100
+./compare_baseline.sh
+
+# 自定义参数
+./compare_baseline.sh 50 200   # warmup=50, iters=200
+```
+
+输出报告：`compare_baseline_nv.md` 或 `compare_baseline_dl.md`
+
+### 硬件性能因子测试
+
+```bash
+# 默认: warmup=100, iters=100
+./hardware_perf_factor.sh
+
+# 自定义参数
+./hardware_perf_factor.sh 50 200   # warmup=50, iters=200
+```
+
+测试项目包括：
+- 启动开销（Empty Kernel, Minimal RW）
+- 内存带宽（Coalesced/Strided/Random Read/Write）
+- Warp操作（Shuffle, Broadcast, Reduce）
+- 同步（__syncthreads, __syncwarp）
+- 计算（expf, Compare/Select）
+- 并行度（不同Block Size）
+
+### 单独运行测试程序
+
+```bash
+# TopK性能测试
+./build/bench_perf <experts> <tokens> <dtype> <topk> [warmup] [iters]
+./build/bench_perf 128 1024 bf16 8 100 100
+
+# 基准性能测试
+./build/bench_baseline <kernel_type> [warmup] [iters]
+./build/bench_baseline empty 100 100
+./build/bench_baseline rw 100 100
+```
+
+## 分析报告
+
+运行测试后会生成以下报告：
+
+| 报告文件 | 说明 |
+|----------|------|
+| `compare_baseline_nv.md` | NV平台基准对比分析 |
+| `compare_baseline_dl.md` | DL平台基准对比分析 |
+| `hardware_performance_comparison.md` | 硬件性能因子对比分析 |
+| `CUDA_Kernel_Execution_Analysis.md` | CUDA Kernel执行流程分析 |
+| `NVIDIA_Profiling_Guide_2026.md` | NVIDIA Profiling指南 |
 
 ## 验证原理
 
