@@ -53,8 +53,8 @@ echo "=============================================="
 echo ""
 
 # Check if binaries exist
-if [ ! -f "build/bench_baseline" ]; then
-    echo "Error: build/bench_baseline not found."
+if [ ! -f "build/bench_factor" ]; then
+    echo "Error: build/bench_factor not found."
     echo "Please run ./build.sh $PLATFORM first."
     exit 1
 fi
@@ -109,10 +109,10 @@ echo ""
 echo "[Step 2/4] Running baseline kernel tests..."
 echo ""
 
-EMPTY_OUTPUT=$(./build/bench_baseline empty $WARMUP $ITERS 2>&1)
+EMPTY_OUTPUT=$(./build/bench_factor empty $WARMUP $ITERS 2>&1)
 EMPTY_TIME_US=$(echo "$EMPTY_OUTPUT" | grep "avg_time_us=" | cut -d'=' -f2)
 
-RW_OUTPUT=$(./build/bench_baseline rw $WARMUP $ITERS 2>&1)
+RW_OUTPUT=$(./build/bench_factor minimal_rw $WARMUP $ITERS 2>&1)
 RW_TIME_US=$(echo "$RW_OUTPUT" | grep "avg_time_us=" | cut -d'=' -f2)
 
 echo "Baseline Results:"

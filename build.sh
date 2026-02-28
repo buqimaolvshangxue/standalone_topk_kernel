@@ -47,16 +47,8 @@ if [ "$PLATFORM" = "nv" ]; then
         -arch=sm_${CUDA_ARCH} \
         -lineinfo
 
-    ${NVCC} -o build/bench_baseline \
-        tests/bench_baseline.cpp \
-        baseline_src/baseline_kernels.cu \
-        -I./src -I./baseline_src \
-        -std=c++17 -O2 \
-        -arch=sm_${CUDA_ARCH} \
-        -lineinfo
-
-    ${NVCC} -o build/bench_hardware_perf_factor \
-        tests/bench_hardware_perf_factor.cpp \
+    ${NVCC} -o build/bench_factor \
+        tests/bench_factor.cpp \
         perf_factor_src/hardware_perf_factor_kernels.cu \
         -I./perf_factor_src \
         -std=c++17 -O2 \
@@ -93,19 +85,8 @@ elif [ "$PLATFORM" = "dl" ]; then
         -soft-spill-allocator \
         -std=c++17 -O2 -DUSE_DLIN
 
-    ${DLCC} -o build/bench_baseline \
-        tests/bench_baseline.cpp \
-        baseline_src/baseline_kernels.cu \
-        -I./src -I./baseline_src -I${SDK_DIR}/include \
-        -L${SDK_DIR}/lib -lcurt \
-        --cuda-gpu-arch=dlgput64 \
-        -mdouble-32 \
-        -mllvm -dlgpu-lower-ptx=true \
-        -soft-spill-allocator \
-        -std=c++17 -O2 -DUSE_DLIN
-
-    ${DLCC} -o build/bench_hardware_perf_factor \
-        tests/bench_hardware_perf_factor.cpp \
+    ${DLCC} -o build/bench_factor \
+        tests/bench_factor.cpp \
         perf_factor_src/hardware_perf_factor_kernels.cu \
         -I./perf_factor_src -I${SDK_DIR}/include \
         -L${SDK_DIR}/lib -lcurt \
@@ -119,4 +100,4 @@ else
     exit 1
 fi
 
-echo "Done: build/verify_topk, build/bench_perf, build/bench_baseline, build/bench_hardware_perf_factor"
+echo "Done: build/verify_topk, build/bench_perf, build/bench_factor"
