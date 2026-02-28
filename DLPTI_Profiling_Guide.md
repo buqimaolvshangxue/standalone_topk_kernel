@@ -12,7 +12,7 @@ export XFORMERS_FORCE_DISABLE_TRITON=1
 ## Step 1: 采集数据
 
 ```bash
-dlpti_tools kprof --targets cu,tu --data-file ./topk.db -- ./build/bench_perf 128 1 bf16 8 2 1
+dlpti_tools kprof --targets cu,tu --data-file ./topk.db --   2 1
 ```
 
 **参数说明：**
@@ -42,6 +42,22 @@ dlpti_tools export --format metric ./topk.db
 ```bash
 dlkprof-ui ./topk.metric.db
 ```
+
+## NV 命令样例
+
+如果你还想用 Nsight Compute/Systems 直接观察 kernel 的指标或时间线，可以在当前工作目录运行以下命令（输出的 `.ncu-rep` / `.qdrep` 文件都会落在当前目录）：
+
+```
+sudo /usr/local/cuda/bin/ncu --set full -o ./ncu_empty -f ./build/bench_factor empty 10 10
+sudo /usr/local/cuda/bin/ncu --set full -o ./ncu_minimal_rw -f ./build/bench_factor minimal_rw 10 10
+sudo /usr/local/cuda/bin/ncu --set full -o ./ncu_topk -f ./build/bench_perf 128 1 bf16 8 10 10
+
+sudo /usr/local/cuda/bin/nsys profile -o ./nsys_empty --force-overwrite true ./build/bench_factor empty 10 10
+sudo /usr/local/cuda/bin/nsys profile -o ./nsys_minimal_rw --force-overwrite true ./build/bench_factor minimal_rw 10 10
+sudo /usr/local/cuda/bin/nsys profile -o ./nsys_topk --force-overwrite true ./build/bench_perf 128 1 bf16 8 10 10
+```
+
+每次命令都会在当前目录生成对应的 `*.ncu-rep` / `*.qdrep`（NSYS 还会带 `.sqlite`），可直接用 `ncu-ui` / `nsys-ui` 打开。
 
 ## 对比 NV 命令
 

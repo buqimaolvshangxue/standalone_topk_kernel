@@ -9,10 +9,6 @@ build/
 *.a
 *.lib
 
-# Profiling outputs
-*.nsys-rep
-*.ncu-rep
-ncu_output.txt
 
 # IDE/Editor
 .vscode/
