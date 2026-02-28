@@ -27,7 +27,9 @@ ITERS=${2:-100}
 # ============================================
 # Detect Platform
 # ============================================
-if command -v nvidia-smi &> /dev/null; then
+NVIDIA_SMI=$(PATH="$PATH:/usr/lib/wsl/lib" which nvidia-smi 2>/dev/null || true)
+
+if [ -n "$NVIDIA_SMI" ]; then
     PLATFORM="nv"
 elif command -v dlcc &> /dev/null || [ -n "${SDK_DIR:-}" ]; then
     PLATFORM="dl"
@@ -72,7 +74,7 @@ echo "[Step 1/4] Collecting GPU information..."
 echo ""
 
 if [ "$PLATFORM" = "nv" ]; then
-    GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader | head -1)
+    GPU_INFO=$($NVIDIA_SMI --query-gpu=name,memory.total,compute_cap --format=csv,noheader | head -1)
     GPU_NAME=$(echo $GPU_INFO | cut -d',' -f1 | sed 's/^ *//;s/ *$//')
     GPU_MEM=$(echo $GPU_INFO | cut -d',' -f2 | tr -d ' ')
     GPU_CC=$(echo $GPU_INFO | cut -d',' -f3 | tr -d ' ')
