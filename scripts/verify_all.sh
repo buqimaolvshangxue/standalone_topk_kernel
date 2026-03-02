@@ -3,14 +3,15 @@
 # Usage: ./verify_all.sh
 
 set -e
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-BENCHMARK="./build/verify_topk"
+BENCHMARK="build/verify_topk"
 GOLDEN_DIR="golden"
 
 # Check if benchmark exists
 if [ ! -f "$BENCHMARK" ]; then
     echo "[ERROR] Benchmark not found: $BENCHMARK"
-    echo "        Run ./build.sh first"
+    echo "        Run scripts/build.sh first"
     exit 1
 fi
 

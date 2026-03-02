@@ -72,7 +72,7 @@ echo "=============================================="
 echo ""
 
 # Check if binary exists, build if not
-if [ ! -f "build/bench_factor" ]; then
+if [ ! -f "../build/bench_factor" ]; then
     echo "Binary not found. Building..."
     ./build.sh $PLATFORM
     echo ""
@@ -84,7 +84,7 @@ printf "%-20s %12s %12s %12s\n" "--------------------" "------------" "---------
 
 # Run each factor test
 for factor in "${FACTORS[@]}"; do
-    OUTPUT=$(./build/bench_factor $factor $WARMUP $ITERS 2>&1)
+    OUTPUT=$(../build/bench_factor $factor $WARMUP $ITERS 2>&1)
     TIME_US=$(echo "$OUTPUT" | grep "avg_time_us=" | cut -d'=' -f2)
     BW_GBPS=$(echo "$OUTPUT" | grep "bandwidth_gbps=" | cut -d'=' -f2)
     PER_OP_US=$(echo "$OUTPUT" | grep "per_op_us=" | cut -d'=' -f2)

@@ -21,7 +21,7 @@ if [ -z "$PLATFORM" ]; then
     echo "Auto-detected platform: $PLATFORM"
 fi
 
-mkdir -p build
+mkdir -p ../build
 
 if [ "$PLATFORM" = "nv" ]; then
     # NVIDIA platform
@@ -31,26 +31,26 @@ if [ "$PLATFORM" = "nv" ]; then
     echo "Building for NVIDIA platform with NVCC: $NVCC"
     echo "CUDA architecture: sm_$CUDA_ARCH"
 
-    ${NVCC} -o build/verify_topk \
-        tests/verify_topk.cpp \
-        src/topk_softmax.cu \
-        -I./src \
+    ${NVCC} -o ../build/verify_topk \
+        ../tests/verify_topk.cpp \
+        ../src/topk_softmax.cu \
+        -I../src \
         -std=c++17 -O2 \
         -arch=sm_${CUDA_ARCH} \
         -lineinfo
 
-    ${NVCC} -o build/bench_perf \
-        tests/bench_perf.cpp \
-        src/topk_softmax.cu \
-        -I./src \
+    ${NVCC} -o ../build/bench_perf \
+        ../tests/bench_perf.cpp \
+        ../src/topk_softmax.cu \
+        -I../src \
         -std=c++17 -O2 \
         -arch=sm_${CUDA_ARCH} \
         -lineinfo
 
-    ${NVCC} -o build/bench_factor \
-        tests/bench_factor.cpp \
-        perf_factor_src/hardware_perf_factor_kernels.cu \
-        -I./perf_factor_src \
+    ${NVCC} -o ../build/bench_factor \
+        ../tests/bench_factor.cpp \
+        ../perf_factor_src/hardware_perf_factor_kernels.cu \
+        -I../perf_factor_src \
         -std=c++17 -O2 \
         -arch=sm_${CUDA_ARCH} \
         -lineinfo
@@ -63,10 +63,10 @@ elif [ "$PLATFORM" = "dl" ]; then
     echo "Building for DL platform with DLCC: $DLCC"
     echo "SDK_DIR: $SDK_DIR"
 
-    ${DLCC} -o build/verify_topk \
-        tests/verify_topk.cpp \
-        src/topk_softmax.cu \
-        -I./src -I${SDK_DIR}/include \
+    ${DLCC} -o ../build/verify_topk \
+        ../tests/verify_topk.cpp \
+        ../src/topk_softmax.cu \
+        -I../src -I${SDK_DIR}/include \
         -L${SDK_DIR}/lib -lcurt \
         --cuda-gpu-arch=dlgput64 \
         -mdouble-32 \
@@ -74,10 +74,10 @@ elif [ "$PLATFORM" = "dl" ]; then
         -soft-spill-allocator \
         -std=c++17 -O2 -DUSE_DLIN
 
-    ${DLCC} -o build/bench_perf \
-        tests/bench_perf.cpp \
-        src/topk_softmax.cu \
-        -I./src -I${SDK_DIR}/include \
+    ${DLCC} -o ../build/bench_perf \
+        ../tests/bench_perf.cpp \
+        ../src/topk_softmax.cu \
+        -I../src -I${SDK_DIR}/include \
         -L${SDK_DIR}/lib -lcurt \
         --cuda-gpu-arch=dlgput64 \
         -mdouble-32 \
@@ -85,10 +85,10 @@ elif [ "$PLATFORM" = "dl" ]; then
         -soft-spill-allocator \
         -std=c++17 -O2 -DUSE_DLIN
 
-    ${DLCC} -o build/bench_factor \
-        tests/bench_factor.cpp \
-        perf_factor_src/hardware_perf_factor_kernels.cu \
-        -I./perf_factor_src -I${SDK_DIR}/include \
+    ${DLCC} -o ../build/bench_factor \
+        ../tests/bench_factor.cpp \
+        ../perf_factor_src/hardware_perf_factor_kernels.cu \
+        -I../perf_factor_src -I${SDK_DIR}/include \
         -L${SDK_DIR}/lib -lcurt \
         --cuda-gpu-arch=dlgput64 \
         -mdouble-32 \
@@ -100,4 +100,4 @@ else
     exit 1
 fi
 
-echo "Done: build/verify_topk, build/bench_perf, build/bench_factor"
+echo "Done: ../build/verify_topk, ../build/bench_perf, ../build/bench_factor"

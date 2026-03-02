@@ -55,15 +55,15 @@ echo "=============================================="
 echo ""
 
 # Check if binaries exist
-if [ ! -f "build/bench_factor" ]; then
+if [ ! -f "../build/bench_factor" ]; then
     echo "Error: build/bench_factor not found."
-    echo "Please run ./build.sh $PLATFORM first."
+    echo "Please run scripts/build.sh $PLATFORM first."
     exit 1
 fi
 
-if [ ! -f "build/bench_perf" ]; then
+if [ ! -f "../build/bench_perf" ]; then
     echo "Error: build/bench_perf not found."
-    echo "Please run ./build.sh $PLATFORM first."
+    echo "Please run scripts/build.sh $PLATFORM first."
     exit 1
 fi
 
@@ -111,10 +111,10 @@ echo ""
 echo "[Step 2/4] Running baseline kernel tests..."
 echo ""
 
-EMPTY_OUTPUT=$(./build/bench_factor empty $WARMUP $ITERS 2>&1)
+EMPTY_OUTPUT=$(../build/bench_factor empty $WARMUP $ITERS 2>&1)
 EMPTY_TIME_US=$(echo "$EMPTY_OUTPUT" | grep "avg_time_us=" | cut -d'=' -f2)
 
-RW_OUTPUT=$(./build/bench_factor minimal_rw $WARMUP $ITERS 2>&1)
+RW_OUTPUT=$(../build/bench_factor minimal_rw $WARMUP $ITERS 2>&1)
 RW_TIME_US=$(echo "$RW_OUTPUT" | grep "avg_time_us=" | cut -d'=' -f2)
 
 echo "Baseline Results:"
@@ -130,16 +130,16 @@ echo ""
 echo "[Step 3/4] Running TopK kernel tests..."
 echo ""
 
-TOPK_1_OUTPUT=$(./build/bench_perf $EXPERTS 1 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
+TOPK_1_OUTPUT=$(../build/bench_perf $EXPERTS 1 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
 TOPK_1_TIME_US=$(echo "$TOPK_1_OUTPUT" | grep "Average kernel time:" | sed 's/.*: \([0-9.]*\) us.*/\1/')
 
-TOPK_4_OUTPUT=$(./build/bench_perf $EXPERTS 4 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
+TOPK_4_OUTPUT=$(../build/bench_perf $EXPERTS 4 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
 TOPK_4_TIME_US=$(echo "$TOPK_4_OUTPUT" | grep "Average kernel time:" | sed 's/.*: \([0-9.]*\) us.*/\1/')
 
-TOPK_256_OUTPUT=$(./build/bench_perf $EXPERTS 256 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
+TOPK_256_OUTPUT=$(../build/bench_perf $EXPERTS 256 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
 TOPK_256_TIME_US=$(echo "$TOPK_256_OUTPUT" | grep "Average kernel time:" | sed 's/.*: \([0-9.]*\) us.*/\1/')
 
-TOPK_1024_OUTPUT=$(./build/bench_perf $EXPERTS 1024 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
+TOPK_1024_OUTPUT=$(../build/bench_perf $EXPERTS 1024 $DTYPE $TOPK $WARMUP $ITERS 2>&1)
 TOPK_1024_TIME_US=$(echo "$TOPK_1024_OUTPUT" | grep "Average kernel time:" | sed 's/.*: \([0-9.]*\) us.*/\1/')
 
 # ============================================

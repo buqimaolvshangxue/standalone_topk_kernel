@@ -4,15 +4,18 @@
 
 set -e
 
-BENCH="./build/bench_perf"
-GOLDEN_DIR="golden"
+set -e
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+BENCH="../build/bench_perf"
+GOLDEN_DIR="../golden"
 WARMUP=${1:-100}     # Default 100 warmup iterations
 ITERS=${2:-100}      # Default 100 test iterations
 
 # Check if benchmark exists
 if [ ! -f "$BENCH" ]; then
     echo "[ERROR] Benchmark not found: $BENCH"
-    echo "        Run ./build.sh first"
+    echo "        Run scripts/build.sh first"
     exit 1
 fi
 
